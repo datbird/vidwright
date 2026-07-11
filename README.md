@@ -1,6 +1,6 @@
 <div align="center">
 
-# VidWright
+<img src="docs/readme/wordmark-banner.png" alt="VidWright" width="520">
 
 **AI-native video editing — fully local, fully agent-driven.**
 
@@ -49,6 +49,8 @@ VidWright is not a replacement for ComfyUI. It is the production layer around Co
 </p>
 
 ## Download
+
+> **Note:** This fork does not publish packaged releases yet. To try VidWright now, **build from source** — see **[HANDOFF.md](HANDOFF.md)**. The section below describes packaged assets and applies once releases are cut here.
 
 Most users should download the packaged desktop app from the [GitHub Releases page](https://github.com/datbird/vidwright/releases).
 
