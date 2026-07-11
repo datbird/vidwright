@@ -1,8 +1,8 @@
 <div align="center">
 
-# Vidwright
+# VidWright
 
-**The open-source AI video workstation — a real editor for you, and 100+ MCP tools for your agent.**
+**AI-native video editing — fully local, fully agent-driven.**
 
 [![Latest Release](https://img.shields.io/github/v/release/datbird/vidwright?label=Latest&color=6C63FF)](https://github.com/datbird/vidwright/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue)](LICENSE)
@@ -20,20 +20,20 @@ English · [Español](docs/i18n/README.es.md) · [简体中文](docs/i18n/README
 
 </div>
 
-<p align="center"><img src="docs/readme/agent-editing.gif" alt="One prompt: Claude builds the edit in Vidwright via MCP" width="860"></p>
+<p align="center"><img src="docs/readme/agent-editing.gif" alt="One prompt: Claude builds the edit in VidWright via MCP" width="860"></p>
 <p align="center"><i>One prompt. The agent generates media, builds the timeline, and mixes the audio — live, via MCP.</i></p>
 
-> **Vidwright is a fork of [Velorn](https://github.com/VelornLabs/velorn)** (© Velorn contributors), released under **GPL-3.0-only**. It is an independent project and is not affiliated with or endorsed by the Velorn maintainers. See [NOTICE](NOTICE) for attribution.
+> **VidWright is a fork of [Velorn](https://github.com/VelornLabs/velorn)** (© Velorn contributors), released under **GPL-3.0-only**. It is an independent project and is not affiliated with or endorsed by the Velorn maintainers. See [NOTICE](NOTICE) for attribution.
 
-Vidwright is an open-source desktop AI video workstation for creators who use ComfyUI. It brings planning, generation, asset management, timeline editing, captions, effects, and export into one project-based app.
+VidWright is an open-source, AI-native video editor that your AI agent can fully operate — editing timelines, generating media through ComfyUI, and mixing audio, all locally on your machine. It brings planning, generation, asset management, timeline editing, captions, effects, and export into one project-based app.
 
-Use built-in local and cloud workflows, bring your own ComfyUI API workflow JSON, or install the bundled Vidwright Bridge so a graph open in ComfyUI can be sent back into Vidwright.
+Use built-in local and cloud workflows, bring your own ComfyUI API workflow JSON, or install the bundled VidWright Bridge so a graph open in ComfyUI can be sent back into VidWright.
 
 <p align="center">
-  <img src="docs/readme/editor-timeline.png" alt="Vidwright editor with generated assets, preview, timeline tracks, and inspector" />
+  <img src="docs/readme/editor-timeline.png" alt="VidWright editor with generated assets, preview, timeline tracks, and inspector" />
 </p>
 
-## What Vidwright Is For
+## What VidWright Is For
 
 - Creating music videos from lyrics, timing, characters, keyframes, video shots, and timeline edits.
 - Building UGC-style creator ads and small-business ads with editable shot plans.
@@ -42,10 +42,10 @@ Use built-in local and cloud workflows, bring your own ComfyUI API workflow JSON
 - Editing generated clips with tracks, transitions, effects, captions, proxy/cache tools, and export.
 - Keeping generated media, prompts, workflow outputs, and timelines organized inside a project.
 
-Vidwright is not a replacement for ComfyUI. It is the production layer around ComfyUI: plan the work, send jobs to ComfyUI, collect the outputs, and finish the edit.
+VidWright is not a replacement for ComfyUI. It is the production layer around ComfyUI: plan the work, send jobs to ComfyUI, collect the outputs, and finish the edit.
 
 <p align="center">
-  <img src="docs/readme/create-workflows.png" alt="Vidwright Create workspace with UGC, business ad, music video, and short film creators" />
+  <img src="docs/readme/create-workflows.png" alt="VidWright Create workspace with UGC, business ad, music video, and short film creators" />
 </p>
 
 ## Download
@@ -61,7 +61,7 @@ Release assets include:
 - `Linux AppImage`
 - `Linux deb`
 
-Ignore GitHub's auto-generated source-code archives unless you plan to build Vidwright from source.
+Ignore GitHub's auto-generated source-code archives unless you plan to build VidWright from source.
 
 ## Main Features
 
@@ -71,25 +71,25 @@ Generate runs built-in local workflows, cloud/partner workflows, and custom Comf
 
 - Local image, video, image-edit, audio, and utility workflows.
 - Cloud workflows such as Nano Banana 2, GPT Image 2, Seedance, Kling, and other partner-node routes where available.
-- Custom Image and Custom Video workflows for users who want Vidwright to run their own ComfyUI API graphs.
+- Custom Image and Custom Video workflows for users who want VidWright to run their own ComfyUI API graphs.
 - API JSON import for advanced users who prefer exporting workflows manually from ComfyUI.
-- Vidwright Bridge support so compatible graphs can be sent from ComfyUI back to the correct Vidwright panel.
+- VidWright Bridge support so compatible graphs can be sent from ComfyUI back to the correct VidWright panel.
 - Workflow setup checks for missing nodes, models, credentials, and configuration.
 - A Featured / My Workflows / Templates browser with Local and Cloud filters. Imported community workflows appear in Featured next to the built-ins.
 
 <p align="center">
-  <img src="docs/readme/generate-featured.png" alt="Vidwright Generate browser with Featured workflows, Local and Cloud filters, and the dependency checker" />
+  <img src="docs/readme/generate-featured.png" alt="VidWright Generate browser with Featured workflows, Local and Cloud filters, and the dependency checker" />
 </p>
 
 The Templates tab browses the official ComfyUI template catalog (500+ templates with size and popularity info) and launches any of them into the embedded ComfyUI tab.
 
 <p align="center">
-  <img src="docs/readme/generate-templates.png" alt="Vidwright Templates browser showing the official ComfyUI template catalog with categories and filters" />
+  <img src="docs/readme/generate-templates.png" alt="VidWright Templates browser showing the official ComfyUI template catalog with categories and filters" />
 </p>
 
 ### Create
 
-Create contains guided creator workflows built on Vidwright's Director Mode engine.
+Create contains guided creator workflows built on VidWright's Director Mode engine.
 
 - **Music Video Creation** - turns a song, lyric timing, characters, references, and a director script into keyframes, video shots, and an editable timeline.
 - **UGC Creator** - builds creator-style social ads with hooks, dialogue, product demos, try-ons, testimonials, and editable shot-by-shot outputs.
@@ -105,7 +105,7 @@ The Music Video Creator supports:
 - People/cast setup, including existing character sheets.
 - Per-shot keyframe prompts, reference images, prompt copy, prompt editing, image replacement, and shot reruns.
 - Built-in keyframe routes such as Qwen Image Edit and Nano Banana 2.
-- Custom keyframe workflows using Vidwright endpoint nodes.
+- Custom keyframe workflows using VidWright endpoint nodes.
 - Built-in video routes such as LTX 2.3 Music and WAN 2.2.
 - Custom video workflows with optional injected keyframe image, prompt, seed, width, height, FPS, duration, and audio.
 - Timeline assembly from generated shot assets.
@@ -138,7 +138,7 @@ Captions can be generated from edited timeline audio and styled in-app.
 The Export tab includes practical render presets, hardware-accelerated options where available, queue controls, and project-aware output settings.
 
 <p align="center">
-  <img src="docs/readme/export-settings.png" alt="Vidwright export settings with presets, codec controls, and export queue" />
+  <img src="docs/readme/export-settings.png" alt="VidWright export settings with presets, codec controls, and export queue" />
 </p>
 
 ### Stock
@@ -146,12 +146,12 @@ The Export tab includes practical render presets, hardware-accelerated options w
 The Stock tab uses Pexels so you can search and import photos or videos directly into the current project. A Pexels API key is optional and can be added in Settings.
 
 <p align="center">
-  <img src="docs/readme/stock-pexels.png" alt="Vidwright Stock tab with Pexels photo and video search" />
+  <img src="docs/readme/stock-pexels.png" alt="VidWright Stock tab with Pexels photo and video search" />
 </p>
 
 ### ComfyUI Integration
 
-Vidwright talks to a local ComfyUI server and can also help launch it.
+VidWright talks to a local ComfyUI server and can also help launch it.
 
 - Default endpoint: `http://127.0.0.1:8188`
 - Custom port support in Settings.
@@ -166,7 +166,7 @@ Only localhost/loopback ComfyUI endpoints are supported in the desktop app.
 
 ### AI Agents (MCP)
 
-Vidwright includes a local MCP server with 100+ tools for Codex, Claude Code, Cursor-compatible tools, and other MCP clients.
+VidWright includes a local MCP server with 100+ tools for Codex, Claude Code, Cursor-compatible tools, and other MCP clients.
 
 - Endpoint: `http://127.0.0.1:19790/mcp`
 - In-app setup: `Settings > Agents (MCP)` (one copy-paste command per client)
@@ -176,43 +176,43 @@ Agents can inspect the open project, review timeline frames and visible shots, t
 
 Agents can also bring in community ComfyUI workflows: hand one a workflow link or file, and it analyzes the graph, reports missing custom nodes and models, installs them after your approval, and runs the workflow on your timeline assets.
 
-Write tools preview their plan first and apply only after approval, on Vidwright's normal undo stack. MCP is the recommended automation path for agent-assisted review, timeline operations, graphics polish, and generation workflows.
+Write tools preview their plan first and apply only after approval, on VidWright's normal undo stack. MCP is the recommended automation path for agent-assisted review, timeline operations, graphics polish, and generation workflows.
 
 <p align="center">
-  <img src="docs/readme/agents-mcp.png" alt="Vidwright Agents (MCP) settings with the running local server, connect commands, and the full tool list" />
+  <img src="docs/readme/agents-mcp.png" alt="VidWright Agents (MCP) settings with the running local server, connect commands, and the full tool list" />
 </p>
 
 ## Custom Workflows
 
-Custom workflows are one of the main reasons Vidwright exists.
+Custom workflows are one of the main reasons VidWright exists.
 
 Advanced users can:
 
-1. Open a starter graph from Vidwright.
+1. Open a starter graph from VidWright.
 2. Modify it in ComfyUI.
-3. Keep the required Vidwright endpoint nodes.
-4. Send it back with the Vidwright Bridge or import the API workflow JSON manually.
-5. Run that graph from Vidwright as part of a creator flow or from Generate.
+3. Keep the required VidWright endpoint nodes.
+4. Send it back with the VidWright Bridge or import the API workflow JSON manually.
+5. Run that graph from VidWright as part of a creator flow or from Generate.
 
-Common Vidwright endpoint node titles include:
+Common VidWright endpoint node titles include:
 
-- Vidwright input image - `VIDWRIGHT_INPUT_IMAGE`
-- Vidwright prompt - `VIDWRIGHT_PROMPT`
-- Vidwright seed - `VIDWRIGHT_SEED`
-- Vidwright width - `VIDWRIGHT_WIDTH`
-- Vidwright height - `VIDWRIGHT_HEIGHT`
-- Vidwright FPS - `VIDWRIGHT_FPS`
-- Vidwright duration - `VIDWRIGHT_DURATION`
-- Vidwright audio - `VIDWRIGHT_AUDIO`
-- Vidwright output image - `VIDWRIGHT_OUTPUT_IMAGE`
-- Vidwright output video - `VIDWRIGHT_OUTPUT_VIDEO`
+- VidWright input image - `VIDWRIGHT_INPUT_IMAGE`
+- VidWright prompt - `VIDWRIGHT_PROMPT`
+- VidWright seed - `VIDWRIGHT_SEED`
+- VidWright width - `VIDWRIGHT_WIDTH`
+- VidWright height - `VIDWRIGHT_HEIGHT`
+- VidWright FPS - `VIDWRIGHT_FPS`
+- VidWright duration - `VIDWRIGHT_DURATION`
+- VidWright audio - `VIDWRIGHT_AUDIO`
+- VidWright output image - `VIDWRIGHT_OUTPUT_IMAGE`
+- VidWright output video - `VIDWRIGHT_OUTPUT_VIDEO`
 
-Exact `VIDWRIGHT_*` titles are preferred, but Vidwright also recognizes readable titles such as `Vidwright input image`. Older graphs that still use `COMFYSTUDIO_*` marker titles are supported for backward compatibility.
+Exact `VIDWRIGHT_*` titles are preferred, but VidWright also recognizes readable titles such as `VidWright input image`. Older graphs that still use `COMFYSTUDIO_*` marker titles are supported for backward compatibility.
 
-If an endpoint is present, Vidwright can inject that value. If an endpoint is not present, the graph controls that setting itself.
+If an endpoint is present, VidWright can inject that value. If an endpoint is not present, the graph controls that setting itself.
 
 <p align="center">
-  <img src="docs/readme/comfyui-bridge.png" alt="Embedded ComfyUI graph with Vidwright endpoint nodes and Send to Vidwright button" />
+  <img src="docs/readme/comfyui-bridge.png" alt="Embedded ComfyUI graph with VidWright endpoint nodes and Send to VidWright button" />
 </p>
 
 ## Requirements
@@ -232,17 +232,17 @@ Local workflow requirements vary by model. Some workflows can run on modest GPUs
 
 ## First Run
 
-1. Install and launch Vidwright.
+1. Install and launch VidWright.
 2. Choose a projects folder.
 3. Create or open a project.
 4. Configure ComfyUI in `Settings > ComfyUI Connection`.
-5. Use `Vidwright > Getting Started` from the bottom menu if you want the guided setup path.
+5. Use `VidWright > Getting Started` from the bottom menu if you want the guided setup path.
 
 If ComfyUI is running on a non-default port, update the endpoint in Settings and run the connection test.
 
 ## ComfyUI Setup Notes
 
-Vidwright ships workflow JSON files, but workflows still need the correct ComfyUI environment.
+VidWright ships workflow JSON files, but workflows still need the correct ComfyUI environment.
 
 Depending on the workflow, users may need:
 
@@ -251,7 +251,7 @@ Depending on the workflow, users may need:
 - Cloud/partner credentials.
 - Enough local VRAM for the selected model and resolution.
 
-Vidwright 0.2.1+ talks to local ComfyUI without any CORS setup. On older Vidwright versions, launch ComfyUI with `--enable-cors-header` if the embedded tab is blank or API calls return 403.
+VidWright 0.2.1+ talks to local ComfyUI without any CORS setup. On older VidWright versions, launch ComfyUI with `--enable-cors-header` if the embedded tab is blank or API calls return 403.
 
 Inside Generate, use the workflow setup and dependency tools when something is missing.
 
@@ -289,13 +289,13 @@ See [ROADMAP.md](ROADMAP.md).
 
 <p align="center">
   <a href="ROADMAP.md">
-    <img src="docs/roadmap-overview.svg" alt="Vidwright roadmap overview" />
+    <img src="docs/roadmap-overview.svg" alt="VidWright roadmap overview" />
   </a>
 </p>
 
 ## Contributing
 
-Vidwright is open source, and contributions are welcome.
+VidWright is open source, and contributions are welcome.
 
 See:
 
@@ -305,6 +305,6 @@ See:
 
 ## License
 
-Vidwright is licensed under the GNU General Public License v3.0. See `LICENSE`.
+VidWright is licensed under the GNU General Public License v3.0. See `LICENSE`.
 
 Versions released before this license change remain available under the license terms they were released with.
