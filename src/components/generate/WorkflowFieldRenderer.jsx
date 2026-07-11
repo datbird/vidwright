@@ -207,12 +207,12 @@ export default function WorkflowFieldRenderer({ field, workflow, values, actions
               </div>
               <p className="mt-1 text-[10px] leading-4 text-sf-text-muted">
                 {customKind === 'video'
-                  ? 'Required: VELORN_PROMPT and VELORN_OUTPUT_VIDEO. Optional: VELORN_INPUT_IMAGE, VELORN_AUDIO, VELORN_SEED, VELORN_WIDTH, VELORN_HEIGHT, VELORN_FPS, VELORN_DURATION.'
-                  : 'Required: VELORN_OUTPUT_IMAGE.'}
+                  ? 'Required: VIDWRIGHT_PROMPT and VIDWRIGHT_OUTPUT_VIDEO. Optional: VIDWRIGHT_INPUT_IMAGE, VIDWRIGHT_AUDIO, VIDWRIGHT_SEED, VIDWRIGHT_WIDTH, VIDWRIGHT_HEIGHT, VIDWRIGHT_FPS, VIDWRIGHT_DURATION.'
+                  : 'Required: VIDWRIGHT_OUTPUT_IMAGE.'}
               </p>
               <p className="mt-1 text-[10px] leading-4 text-sf-text-muted">
                 {customKind === 'video'
-                  ? 'Velorn shows controls for supported endpoint nodes found in the loaded graph. Leave an endpoint out when you want ComfyUI to control that setting.'
+                  ? 'Vidwright shows controls for supported endpoint nodes found in the loaded graph. Leave an endpoint out when you want ComfyUI to control that setting.'
                   : 'Use ComfyUI to control prompts, references, seed, size, and model settings for this image graph.'}
               </p>
               <div className={`mt-2 text-[10px] ${isReady ? 'text-emerald-300' : 'text-amber-200'}`}>
@@ -257,7 +257,7 @@ export default function WorkflowFieldRenderer({ field, workflow, values, actions
           {customState.bridge && (
             <div className="mt-3 flex flex-col gap-2 border-t border-sf-dark-700 pt-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-wrap items-center gap-2 text-[10px] text-sf-text-muted">
-                <span className="font-semibold uppercase tracking-wider">Velorn bridge</span>
+                <span className="font-semibold uppercase tracking-wider">Vidwright bridge</span>
                 <span className={`rounded-full border px-2 py-0.5 ${
                   customState.bridge.installed
                     ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'

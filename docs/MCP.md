@@ -1,12 +1,12 @@
-# Velorn MCP Guide
+# Vidwright MCP Guide
 
-Velorn includes a local Model Context Protocol (MCP) server so AI agents can inspect and operate on the open Velorn project. It is designed for agents such as Codex, Claude Code, Cursor-compatible MCP clients, and other open source MCP clients that can talk to a local HTTP MCP server.
+Vidwright includes a local Model Context Protocol (MCP) server so AI agents can inspect and operate on the open Vidwright project. It is designed for agents such as Codex, Claude Code, Cursor-compatible MCP clients, and other open source MCP clients that can talk to a local HTTP MCP server.
 
 The MCP server is part of the desktop app. It exposes the current project, active timeline, assets, ComfyUI connection state, generation state, visual frame inspection, safe timeline edit actions, caption actions, export actions, and workflow setup helpers.
 
 ## Quick Start
 
-1. Launch the Velorn desktop app.
+1. Launch the Vidwright desktop app.
 2. Open a project. Some setup tools work without a project, but timeline and asset tools need one.
 3. Open `Settings > Agents (MCP)`.
 4. Confirm the server is `Running`.
@@ -21,13 +21,13 @@ The in-app settings panel also shows copyable setup commands.
 For Codex:
 
 ```bash
-codex mcp add velorn --url http://127.0.0.1:19790/mcp
+codex mcp add vidwright --url http://127.0.0.1:19790/mcp
 ```
 
 For Claude Code:
 
 ```bash
-claude mcp add --transport http velorn http://127.0.0.1:19790/mcp
+claude mcp add --transport http vidwright http://127.0.0.1:19790/mcp
 ```
 
 For clients that use an `.mcp.json` file:
@@ -35,7 +35,7 @@ For clients that use an `.mcp.json` file:
 ```json
 {
   "mcpServers": {
-    "velorn": {
+    "vidwright": {
       "type": "http",
       "url": "http://127.0.0.1:19790/mcp"
     }
@@ -43,11 +43,11 @@ For clients that use an `.mcp.json` file:
 }
 ```
 
-Velorn keeps this same local config in the repository root for development.
+Vidwright keeps this same local config in the repository root for development.
 
 ## What Agents Can Do
 
-Velorn MCP is useful for five broad workflows:
+Vidwright MCP is useful for five broad workflows:
 
 - Review an edit: inspect timelines, clips, visible shots, frame contact sheets, disabled clips, missing media, gaps, markers, transforms, and export readiness.
 - Make safe editorial changes: move, trim, split, delete, enable/disable, label, retime, adjust audio, add transitions, manage tracks, and manage timelines.
@@ -55,7 +55,7 @@ Velorn MCP is useful for five broad workflows:
 - Drive generation: prepare Generate from the current timeline frame, queue approved generation batches, inspect bundled workflows, validate ComfyUI nodes, and place generated assets back into timelines.
 - Deliver: set In/Out ranges, run H.264 delivery exports, run social delivery batches, export FCPXML, and inspect exported files.
 
-The MCP server is not a replacement for the Velorn UI. It is a project-aware control layer for agents. The best results come from asking the agent to inspect first, show a preview plan, then apply only after approval.
+The MCP server is not a replacement for the Vidwright UI. It is a project-aware control layer for agents. The best results come from asking the agent to inspect first, show a preview plan, then apply only after approval.
 
 ## Safety Model
 
@@ -65,7 +65,7 @@ The server runs only on loopback:
 127.0.0.1:19790
 ```
 
-Do not proxy or expose this port to a network. Any local process that can connect to the port can call the MCP server while Velorn is running.
+Do not proxy or expose this port to a network. Any local process that can connect to the port can call the MCP server while Vidwright is running.
 
 Most write-capable tools support `previewOnly` and many default to preview mode. In preview mode the tool returns the planned operation and usually a suggested apply call. To apply, the agent calls the same tool again with:
 
@@ -80,22 +80,22 @@ Recommended agent behavior:
 3. Use `previewOnly: true` before write actions.
 4. Ask for explicit user approval before applying changes that write files, queue generation, spend credits, start GPU work, change settings, or modify timelines.
 5. Use `create_project_checkpoint` before risky multi-step edits.
-6. Use `run_mcp_action_plan` for approved multi-step work so Velorn can checkpoint first and stop on the first error.
+6. Use `run_mcp_action_plan` for approved multi-step work so Vidwright can checkpoint first and stop on the first error.
 
-Undoable timeline changes use Velorn's normal undo stack. Project creation, project duplication, exports, generated assets, and imported media can write files to disk.
+Undoable timeline changes use Vidwright's normal undo stack. Project creation, project duplication, exports, generated assets, and imported media can write files to disk.
 
 ## A Good First Agent Prompt
 
 After connecting your client, try:
 
 ```text
-You are connected to Velorn. Call get_mcp_recipes, summarize what review and edit passes are available, then inspect the open project with get_project and get_timeline. Do not make changes yet.
+You are connected to Vidwright. Call get_mcp_recipes, summarize what review and edit passes are available, then inspect the open project with get_project and get_timeline. Do not make changes yet.
 ```
 
 For a timeline health pass:
 
 ```text
-Review this Velorn timeline for delivery risks. Use analyze_timeline and check_media_health first. If you want to add markers, show me the add_timeline_markers previewOnly plan before applying anything.
+Review this Vidwright timeline for delivery risks. Use analyze_timeline and check_media_health first. If you want to add markers, show me the add_timeline_markers previewOnly plan before applying anything.
 ```
 
 For visual review:
@@ -117,7 +117,7 @@ Protocol:
 - MCP over local HTTP.
 - JSON-RPC endpoint: `POST http://127.0.0.1:19790/mcp`
 - Server-sent-event probe: `GET http://127.0.0.1:19790/mcp`
-- Server name: `velorn`
+- Server name: `vidwright`
 - Default protocol version: `2024-11-05`
 
 The server starts with the desktop app. If the port is not available, check `Settings > Agents (MCP)` for the current status/error.
@@ -190,7 +190,7 @@ Use this when the user asks for concrete timeline changes:
 Use this to extend, replace, or vary a shot:
 
 1. `inspect_timeline_frame`
-2. `list_velorn_workflows`
+2. `list_vidwright_workflows`
 3. `prepare_generation_from_timeline_context` with `previewOnly: true`
 4. Apply the prepare step only after approval.
 5. `queue_prepared_generation` or `queue_timeline_generation_batch` with preview first.
@@ -215,7 +215,7 @@ Downloads are https-only, existing files are never overwritten, and nothing inst
 
 Use this when the user gives a creative brief instead of a timeline source:
 
-1. `list_velorn_workflows`
+1. `list_vidwright_workflows`
 2. `create_asset_folder` with preview first.
 3. `queue_prompt_generation_batch` with preview first.
 4. `get_generation_status`
@@ -251,7 +251,7 @@ For interchange, preview `export_fcpxml` before writing a file.
 
 ## Tool Catalog
 
-Velorn currently exposes 103 MCP tools.
+Vidwright currently exposes 103 MCP tools.
 
 ### Project, Recipes, And Discovery
 
@@ -261,7 +261,7 @@ Velorn currently exposes 103 MCP tools.
 | `get_timeline` | Return active timeline tracks, clips, markers, and optionally transitions. |
 | `get_assets` | Return project assets without exposing heavy blobs or preview URLs. |
 | `get_ai_review_passes` | Return practical AI review recipes. |
-| `get_mcp_recipes` | Alias-style recipe entry point for agents asking what Velorn MCP can do. |
+| `get_mcp_recipes` | Alias-style recipe entry point for agents asking what Vidwright MCP can do. |
 | `find_timeline_items` | Search clips, tracks, markers, transitions, and assets before targeting changes. |
 | `list_recent_projects` | List recent projects, even when none is open. |
 | `open_project` | Preview or open a project by path or recent project name. |
@@ -288,15 +288,15 @@ Velorn currently exposes 103 MCP tools.
 
 | Tool | Purpose |
 | --- | --- |
-| `guide_comfyui_setup` | Beginner-friendly setup wizard for connecting Velorn to ComfyUI. |
+| `guide_comfyui_setup` | Beginner-friendly setup wizard for connecting Vidwright to ComfyUI. |
 | `diagnose_comfyui_connection` | Diagnose configured localhost port, API health, launcher state, and likely install mode. |
-| `set_comfyui_connection` | Preview or set Velorn's local ComfyUI port. |
+| `set_comfyui_connection` | Preview or set Vidwright's local ComfyUI port. |
 | `repair_comfyui_connection` | Probe likely ports and preview/apply a safe port-setting repair. |
-| `control_comfyui_launcher` | Preview/apply start, stop, or restart through Velorn's launcher. |
+| `control_comfyui_launcher` | Preview/apply start, stop, or restart through Vidwright's launcher. |
 | `get_comfyui_launcher_logs` | Return recent launcher logs with common issue summaries. |
 | `validate_comfyui_nodes` | Check if ComfyUI node class names are available from `/object_info`. |
-| `list_velorn_workflows` | List bundled workflows on the machine. |
-| `inspect_velorn_workflow` | Inspect workflow JSON, extract required classes, and validate nodes. |
+| `list_vidwright_workflows` | List bundled workflows on the machine. |
+| `inspect_vidwright_workflow` | Inspect workflow JSON, extract required classes, and validate nodes. |
 | `list_comfyui_templates` | Search official ComfyUI workflow templates. |
 | `queue_timeline_template_generation` | Preview or queue an official ComfyUI template — or an imported community workflow via `importedWorkflowId` — from a timeline source clip. |
 | `import_comfyui_workflow` | Preview or import a community ComfyUI workflow (comfy.org share URL, local .json, or inline JSON) as a runnable imported template with a dependency report. |
@@ -307,8 +307,8 @@ Velorn currently exposes 103 MCP tools.
 
 | Tool | Purpose |
 | --- | --- |
-| `undo` | Undo latest Velorn timeline or project-structure edit. |
-| `redo` | Redo latest Velorn timeline or project-structure edit. |
+| `undo` | Undo latest Vidwright timeline or project-structure edit. |
+| `redo` | Redo latest Vidwright timeline or project-structure edit. |
 | `set_playhead` | Move the playhead by seconds, timecode, or frame. |
 | `select_clips` | Select clips by ID, filter, track, time, type, label, or search. |
 | `select_assets` | Select/preview project assets by ID, name, type, folder, status, or latest match. |
@@ -404,7 +404,7 @@ Velorn currently exposes 103 MCP tools.
 
 | Tool | Purpose |
 | --- | --- |
-| `export_timeline` | Preview/start a timeline export through Velorn's export worker. |
+| `export_timeline` | Preview/start a timeline export through Vidwright's export worker. |
 | `export_delivery_batch` | Preview/run several delivery exports such as 16:9, 1:1, and 9:16. |
 | `export_fcpxml` | Preview/export the active timeline as FCPXML for Resolve, Final Cut, or Premiere. |
 
@@ -485,15 +485,15 @@ Preview a delivery export:
 
 ### The MCP client cannot connect
 
-- Make sure the Velorn desktop app is running.
+- Make sure the Vidwright desktop app is running.
 - Check `Settings > Agents (MCP)` for `Running`.
 - Confirm the endpoint is `http://127.0.0.1:19790/mcp`.
 - If the port is unavailable, another local process may already be using `19790`.
-- Restart Velorn after changing development branches or rebuilding Electron code.
+- Restart Vidwright after changing development branches or rebuilding Electron code.
 
 ### The agent says no project is open
 
-Open a project in Velorn, then try again. The agent can call `list_recent_projects` and `open_project`, but most timeline and asset tools need an active project snapshot.
+Open a project in Vidwright, then try again. The agent can call `list_recent_projects` and `open_project`, but most timeline and asset tools need an active project snapshot.
 
 ### A write tool previews but does not apply
 
@@ -510,7 +510,7 @@ Ask the agent to use:
 1. `diagnose_comfyui_connection`
 2. `get_comfyui_launcher_logs`
 3. `validate_comfyui_nodes`
-4. `inspect_velorn_workflow`
+4. `inspect_vidwright_workflow`
 
 These tools can distinguish port issues, missing custom nodes, missing models, launcher problems, and workflow compatibility issues.
 
@@ -530,7 +530,7 @@ For square or vertical exports, make sure the agent previews `deliveryFraming` s
 - Use `tools/list` to discover schemas at runtime. The catalog can grow over time.
 - Tool results are returned as MCP content blocks, usually text containing JSON.
 - Frame and contact-sheet inspection tools may include image content when requested and when size limits allow.
-- Keep the MCP client connected to the local machine running Velorn. This is not a cloud API.
+- Keep the MCP client connected to the local machine running Vidwright. This is not a cloud API.
 - Do not assume a write tool changed the project unless the returned result says it applied successfully.
 - Favor explicit IDs from read tools over natural-language targeting for write tools.
 - Queueing generation and running exports can take time. Poll status tools such as `get_generation_status`, `get_caption_status`, or inspect output files after completion.

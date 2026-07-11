@@ -24,7 +24,7 @@ import {
   SHORT_FILM_VIDEO_RESOLUTION_OPTIONS,
 } from '../../config/shortFilmConfig'
 
-const DRAFT_STORAGE_KEY = 'comfystudio-short-film-easy-mode-draft-v1'
+const DRAFT_STORAGE_KEY = 'vidwright-short-film-easy-mode-draft-v1'
 
 const STEPS = [
   { id: 'story', label: 'Story', number: '1' },
@@ -493,7 +493,7 @@ function buildLlmBrief({ draft, characters, locations }) {
     `  - ${location.slug}: ${location.name}. ${location.description || 'No description yet.'}`
   ))
 
-  return `You are writing and directing a short film for Velorn.
+  return `You are writing and directing a short film for Vidwright.
 
 Return a production-ready short film script and shot plan that can be parsed into dialogue audio, keyframes, videos, and an editor timeline.
 

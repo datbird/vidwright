@@ -144,7 +144,7 @@ export async function enqueuePlaybackTranscode(projectDir, assetId, sourcePath, 
         // that orphaned is safer than risking the newly-built cache.
       }
     }
-    if (typeof localStorage !== 'undefined' && localStorage.getItem('comfystudio-debug-playback') === '1') {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('vidwright-debug-playback') === '1') {
       console.log('[PlaybackCache] (debug) URL:', url?.slice?.(0, 70) + '...')
     }
     return { success: true, relativePath: result.relativePath }

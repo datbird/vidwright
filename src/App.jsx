@@ -84,7 +84,7 @@ function App() {
   const MIN_TIMELINE = 180 // Accounts for transport controls (40px) + minimum timeline
   const MAX_TIMELINE = 900
 
-  const LAYOUT_STORAGE_KEY = 'comfystudio-editor-layout'
+  const LAYOUT_STORAGE_KEY = 'vidwright-editor-layout'
   const [comfyIframeUrl, setComfyIframeUrl] = useState(() => getLocalComfyHttpBaseSync())
   // Bumped to force-remount the ComfyUI iframe (e.g. when the user clicks the
   // reload button in the tab header). Necessary because the iframe is kept
@@ -295,14 +295,14 @@ function App() {
   // When user sends timeline frame to Generate (right-click preview → Extend with AI / Starting keyframe for AI)
   useEffect(() => {
     const handler = () => setMainTab('generate')
-    window.addEventListener('comfystudio-open-generate-with-frame', handler)
-    return () => window.removeEventListener('comfystudio-open-generate-with-frame', handler)
+    window.addEventListener('vidwright-open-generate-with-frame', handler)
+    return () => window.removeEventListener('vidwright-open-generate-with-frame', handler)
   }, [])
 
   useEffect(() => {
     const handler = () => setMainTab('generate')
-    window.addEventListener('comfystudio-open-generate-tab', handler)
-    return () => window.removeEventListener('comfystudio-open-generate-tab', handler)
+    window.addEventListener('vidwright-open-generate-tab', handler)
+    return () => window.removeEventListener('vidwright-open-generate-tab', handler)
   }, [])
 
   // Allow Generate tab to open ComfyUI directly (used for workflow import guidance).
@@ -310,8 +310,8 @@ function App() {
     const handler = () => {
       setMainTab('comfyui')
     }
-    window.addEventListener('comfystudio-open-comfyui-tab', handler)
-    return () => window.removeEventListener('comfystudio-open-comfyui-tab', handler)
+    window.addEventListener('vidwright-open-comfyui-tab', handler)
+    return () => window.removeEventListener('vidwright-open-comfyui-tab', handler)
   }, [])
 
   // Load persisted layout on mount (single read)
@@ -622,7 +622,7 @@ function App() {
                 title="Save the workflow currently open below to your library (Generate → Custom), so you can reopen it here anytime"
               >
                 {comfySaveState.phase === 'busy' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookmarkPlus className="w-3.5 h-3.5" />}
-                Save to Velorn
+                Save to Vidwright
               </button>
             )}
             <button

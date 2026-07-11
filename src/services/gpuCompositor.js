@@ -17,7 +17,7 @@
  * and the final readback pass unpremultiplies for the FFmpeg pipe (which
  * expects the same straight RGBA that getImageData produced).
  *
- * Kill switch: localStorage 'comfystudio-export-gpu' = '0' (checked by the
+ * Kill switch: localStorage 'vidwright-export-gpu' = '0' (checked by the
  * exporter via isGpuExportEnabled). WebGL2 init failure falls back to the
  * 2D path automatically.
  */
@@ -37,7 +37,7 @@ import {
   VELOCITY_BLUR_FRAGMENT_SOURCE,
 } from '../utils/velocityMotionBlur'
 
-const GPU_EXPORT_FLAG_KEY = 'comfystudio-export-gpu'
+const GPU_EXPORT_FLAG_KEY = 'vidwright-export-gpu'
 
 export const isGpuExportEnabled = () => {
   try {

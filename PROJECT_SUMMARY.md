@@ -1,4 +1,4 @@
-# Velorn - AI Animatic Studio
+# Vidwright - AI Animatic Studio
 
 ## Overview
 AI-powered video editing app with DaVinci Resolve-style UI. Integrates with ComfyUI for AI video generation.
@@ -19,14 +19,14 @@ npm run dev
 ```
 Opens at `http://localhost:5173`
 
-**Splash screen:** Place your splash image at **`public/splash.png`** (or `public/splash.jpg`). It is shown for 3 seconds when starting the Electron app (`npm run electron:dev` or the built app) before the main window opens. Subtitle on splash: "Velorn — AI Animatic Studio".
+**Splash screen:** Place your splash image at **`public/splash.png`** (or `public/splash.jpg`). It is shown for 3 seconds when starting the Electron app (`npm run electron:dev` or the built app) before the main window opens. Subtitle on splash: "Vidwright — AI Animatic Studio".
 
 ## Layout Structure
 
 ### Normal Mode (Contracted Left Panel)
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  [🏠] Velorn │ Project Name │ [💾]    Title Bar      │
+│  [🏠] Vidwright │ Project Name │ [💾]    Title Bar      │
 ├──┬──────────┬─────────────────────────┬──────────────┬──┤
 │I │  Left    │                         │   Inspector  │I │
 │C │  Panel   │        Preview          │   Panel      │C │
@@ -50,7 +50,7 @@ Opens at `http://localhost:5173`
 ### Expanded Mode (Full Height Left Panel - Resolve-style)
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  [🏠] Velorn │ Project Name │ [💾]    Title Bar      │
+│  [🏠] Vidwright │ Project Name │ [💾]    Title Bar      │
 ├──┬──────────┬─────────────────────────┬──────────────┬──┤
 │I │  Left    │                         │   Inspector  │I │
 │C │  Panel   │        Preview          │   Panel      │C │
@@ -85,7 +85,7 @@ On first launch, users are prompted to select a **Projects Folder**. All project
 ### Project Folder Structure
 ```
 MyProject/
-├── project.comfystudio        # JSON (timeline, assets, settings)
+├── project.vidwright        # JSON (timeline, assets, settings)
 ├── assets/
 │   ├── video/                 # Imported videos
 │   ├── audio/                 # Audio files
@@ -404,8 +404,8 @@ Export full edits (cuts, transitions, masks, text, audio) to a video file.
 - **Text colors**: `sf-text-primary` (#e5e5e5), `sf-text-secondary` (#a3a3a3), `sf-text-muted` (#737373)
 - **Persistence**: Zustand with `persist` middleware → localStorage
 - **Panel widths**: Left 200-450px, Right 200-400px, Timeline 180-450px (default 320px)
-- **Layout persistence**: Editor layout (timeline height, left/right panel width, expanded state) saved to `localStorage` key `comfystudio-editor-layout` and restored on launch
-- **Track headers width**: Default 208px, resizable 100-400px; persisted in `comfystudio-timeline-track-headers-width`
+- **Layout persistence**: Editor layout (timeline height, left/right panel width, expanded state) saved to `localStorage` key `vidwright-editor-layout` and restored on launch
+- **Track headers width**: Default 208px, resizable 100-400px; persisted in `vidwright-timeline-track-headers-width`
 - **Collapsible panels**: Icon bar always visible (48px each side)
 - **Full-height mode**: Left panel can expand to span entire height (Resolve-style)
 - **Draggable inputs**: Position X/Y, Anchor X/Y - click+drag to adjust, double-click to edit
@@ -503,7 +503,7 @@ clearAllKeyframes(clipId)
 
 **Asset-to-timeline drag preview:**
 - While dragging an asset from the Assets panel onto the timeline (before mouse-up), a **live ghost clip** appears on the target track at the current drop position. The preview shows: clip type (VID/IMG/AUD), asset name, duration (frame-quantized), and track/target time. Video/image tracks use a semi-transparent teal ghost with orange border; audio tracks use the same Resolve-style green tint. Preview updates as the cursor moves across tracks and along the timeline. On drop, the real clip is placed where the ghost was; preview clears on drop, drag leave, or drag end.
-- **Implementation:** `Timeline.jsx`: state `assetDropPreview` (assetId, trackId, startTime, duration, assetType, name, willCreateTrack); `renderAssetDropPreviewClip(track)` renders the ghost; `handleDragOver` computes drop position and duration via `getDropStartTime`, `getDropPreviewDuration`, `resolveDropTrackForAsset`, `canDropAssetOnTrack`. Overlay assets (letterbox/vignette/color matte) show “+ track on drop” when a new video track would be created. `getDraggedAssetId` reads from `dataTransfer` (assetId, text/plain JSON) with fallback to `draggedAssetId` from custom events. Global `dragend`/`drop` and custom `comfystudio-assets-drag-start` / `comfystudio-assets-drag-end` clear preview. **AssetsPanel.jsx:** `notifyAssetDragStart(assetId, idsToMove)` and `notifyAssetDragEnd()` dispatch window events on drag start/end for all three asset drag surfaces (grid, list, list expanded folders) so the timeline can show preview even when `dataTransfer.getData()` is restricted during dragover in some environments.
+- **Implementation:** `Timeline.jsx`: state `assetDropPreview` (assetId, trackId, startTime, duration, assetType, name, willCreateTrack); `renderAssetDropPreviewClip(track)` renders the ghost; `handleDragOver` computes drop position and duration via `getDropStartTime`, `getDropPreviewDuration`, `resolveDropTrackForAsset`, `canDropAssetOnTrack`. Overlay assets (letterbox/vignette/color matte) show “+ track on drop” when a new video track would be created. `getDraggedAssetId` reads from `dataTransfer` (assetId, text/plain JSON) with fallback to `draggedAssetId` from custom events. Global `dragend`/`drop` and custom `vidwright-assets-drag-start` / `vidwright-assets-drag-end` clear preview. **AssetsPanel.jsx:** `notifyAssetDragStart(assetId, idsToMove)` and `notifyAssetDragEnd()` dispatch window events on drag start/end for all three asset drag surfaces (grid, list, list expanded folders) so the timeline can show preview even when `dataTransfer.getData()` is restricted during dragover in some environments.
 
 ### Inspector sliders, transitions, timeline scroll (Feb 2026)
 
@@ -558,7 +558,7 @@ clearAllKeyframes(clipId)
 **Extend with AI / Starting keyframe for AI:**
 - Park the playhead on any video or image clip. Right-click the preview (timeline mode) → **Extend with AI** or **Starting keyframe for AI**. The frame from the **topmost** clip at the playhead is captured and sent to the Generate tab; the app switches to Generate with that frame as input.
 - **Generate tab:** When a timeline frame is set, a card shows the frame thumbnail, mode (Extend / Keyframe), and **Clear timeline frame**. User chooses **Image to Video (LTX2)** or **Image to Video (WAN 2.2)**, enters prompt, and queues. The job uses the captured frame file (no asset required); `runJob` supports `job.inputFromTimelineFrame` and reads the file from `frameForAIStore`.
-- **Files:** `src/stores/frameForAIStore.js` (new), `src/utils/captureTimelineFrame.js` (new; `getTopmostVideoOrImageClipAtTime`, `captureTimelineFrameAt`), `PreviewPanel.jsx` (context menu items, capture + dispatch `comfystudio-open-generate-with-frame`), `GenerateWorkspace.jsx` (frame card, use of store, job `inputFromTimelineFrame`), `App.jsx` (listener to switch to Generate tab). Import fix: use **named** import `import { useFrameForAIStore } from '../stores/frameForAIStore'` (store has no default export).
+- **Files:** `src/stores/frameForAIStore.js` (new), `src/utils/captureTimelineFrame.js` (new; `getTopmostVideoOrImageClipAtTime`, `captureTimelineFrameAt`), `PreviewPanel.jsx` (context menu items, capture + dispatch `vidwright-open-generate-with-frame`), `GenerateWorkspace.jsx` (frame card, use of store, job `inputFromTimelineFrame`), `App.jsx` (listener to switch to Generate tab). Import fix: use **named** import `import { useFrameForAIStore } from '../stores/frameForAIStore'` (store has no default export).
 
 **AI/IMP tags on timeline clips:**
 - Video and image clips on the timeline now show an **AI** (orange) or **IMP** (gray) badge next to the clip name (video) or next to the IMG badge (image), matching the Assets panel. Lookup via `getAssetById(clip.assetId)`; badge only when asset exists. **Files:** `Timeline.jsx` (getAssetById from store, badge in video and image clip render blocks).
@@ -645,7 +645,7 @@ clearAllKeyframes(clipId)
 - `getAssetUrl(assetId)` prefers `asset.playbackCacheUrl` when set; `useClipUrl` subscribes to the asset's URL so the timeline re-renders when cache becomes ready.
 - Video cache uses a dedicated key for playback-cache URL (`clipId|pb`) so we don't reuse an element that had its `src` switched (avoids black on play). Playback-cache element waits for `canplay` before considered ready.
 - **Files:** `src/services/playbackCache.js` (new), `electron/main.js` (IPC `playback:transcode`), `electron/preload.js`, `src/stores/assetsStore.js` (playbackCachePath/Url, setPlaybackCache, loadFromProject restores cache URL), `src/components/VideoLayerRenderer.jsx` (useClipUrl subscribes to asset URL), `src/services/videoCache.js` (_cacheKey, _getEntry, baseClipId), `src/services/fileSystem.js` (cache folder in createProjectFolder), GenerateWorkspace/AssetsPanel/StockPanel (enqueuePlaybackTranscode after add video asset).
-- Console: `[PlaybackCache] Transcoding...` and `[PlaybackCache] Ready - using cached file for playback`. Optional debug: `localStorage.setItem('comfystudio-debug-playback', '1')`.
+- Console: `[PlaybackCache] Transcoding...` and `[PlaybackCache] Ready - using cached file for playback`. Optional debug: `localStorage.setItem('vidwright-debug-playback', '1')`.
 
 **Keyboard / input focus:**
 - Global shortcuts (J/K/L, I/O, S, R, Delete, Space, etc.) now skip when `document.activeElement` is INPUT, TEXTAREA, SELECT, or contentEditable. Fixes typing in prompt fields and Stock search bar.
@@ -983,7 +983,7 @@ When clips have effects (like masks), real-time compositing can cause desync. Th
 **Cache File Storage:**
 ```
 MyProject/
-├── project.comfystudio
+├── project.vidwright
 ├── assets/
 ├── cache/                          # NEW - Render cache folder
 │   ├── clip-123_1234567890.webm   # Cached video with effects
@@ -1073,9 +1073,9 @@ clearClipRenderCaches(projectDir, clipId)
 
 **Launch & Layout (Feb 4, 2026):**
 - **DevTools**: No longer open automatically on launch; still available via F12 or Ctrl+Shift+I.
-- **Layout persistence**: Timeline height, left/right panel width, and panel expanded state saved to `localStorage` (`comfystudio-editor-layout`) and restored on next launch.
+- **Layout persistence**: Timeline height, left/right panel width, and panel expanded state saved to `localStorage` (`vidwright-editor-layout`) and restored on next launch.
 - **Default timeline height**: 320px (was 240px) so track headers are visible without resizing.
-- **Track headers width**: Default 208px (was 144px); persisted in `comfystudio-timeline-track-headers-width`.
+- **Track headers width**: Default 208px (was 144px); persisted in `vidwright-timeline-track-headers-width`.
 - Files: `electron/main.js`, `src/App.jsx`, `src/components/Timeline.jsx`
 
 **Audio Tracks & Mono/Stereo (Feb 4, 2026):**
@@ -1192,7 +1192,7 @@ Added filmstrip-style thumbnail sprite generation for instant scrubbing performa
 **Project Folder Structure Update:**
 ```
 MyProject/
-├── project.comfystudio
+├── project.vidwright
 ├── assets/
 ├── cache/
 ├── thumbnails/              # NEW - Sprite storage

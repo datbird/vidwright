@@ -7,7 +7,7 @@
 
 export const IMPORTED_WORKFLOW_ID_PREFIX = 'tpl-'
 export const IMPORTED_WORKFLOWS_DIR_NAME = 'generate-templates'
-export const IMPORTED_WORKFLOWS_CHANGED_EVENT = 'comfystudio:imported-workflows-changed'
+export const IMPORTED_WORKFLOWS_CHANGED_EVENT = 'vidwright:imported-workflows-changed'
 
 const ENTRY_FILE_NAME = 'entry.json'
 export const IMPORTED_WORKFLOW_FILE_NAME = 'workflow.json'

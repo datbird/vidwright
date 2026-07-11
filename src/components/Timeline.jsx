@@ -43,7 +43,7 @@ import MasterAudioMeter from './AudioMeter'
 import GenerateMusicPopover from './GenerateMusicPopover'
 import { analyzeAudioSource } from '../services/audioAnalysis'
 
-const TRANSITION_DEFAULT_DURATION_KEY = 'comfystudio-transition-default-duration-frames'
+const TRANSITION_DEFAULT_DURATION_KEY = 'vidwright-transition-default-duration-frames'
 const DEFAULT_WAVEFORM_SAMPLES = 8192
 const MARQUEE_DRAG_THRESHOLD_PX = 6
 const MARQUEE_AUTO_SCROLL_EDGE_PX = 32
@@ -87,7 +87,7 @@ const ROLL_EDIT_MAX_GAP_SECONDS = 1 / FRAME_RATE
 const AUDIO_WAVEFORM_CACHE = new Map()
 const AUDIO_WAVEFORM_PENDING = new Map()
 let audioWaveformContext = null
-const TIMELINE_TOOL_STORAGE_KEY = 'comfystudio-timeline-active-tool-v1'
+const TIMELINE_TOOL_STORAGE_KEY = 'vidwright-timeline-active-tool-v1'
 const TIMELINE_TOOLS = Object.freeze({
   AUTO: 'auto',
   SELECT: 'select',
@@ -258,7 +258,7 @@ const buildWaveformPeaks = (audioBuffer, sampleCount = DEFAULT_WAVEFORM_SAMPLES)
   }
 }
 
-const isNativeMediaUrl = (url) => /^file:\/\//i.test(url) || /^comfystudio:\/\//i.test(url)
+const isNativeMediaUrl = (url) => /^file:\/\//i.test(url) || /^vidwright:\/\//i.test(url)
 const isAbsoluteMediaPath = (value) => (
   /^[a-zA-Z]:[\\/]/.test(String(value || ''))
   || String(value || '').startsWith('/')
@@ -518,13 +518,13 @@ function Timeline({ onActiveToolChange }) {
   // Track headers width (resizable) — default wide enough to read labels; persisted
   const TRACK_HEADERS_MIN = 100
   const TRACK_HEADERS_MAX = 400
-  const TRACK_HEADERS_STORAGE_KEY = 'comfystudio-timeline-track-headers-width'
+  const TRACK_HEADERS_STORAGE_KEY = 'vidwright-timeline-track-headers-width'
   const VIDEO_TRACK_HEIGHT_DEFAULT = 48
   const AUDIO_TRACK_HEIGHT_MONO_DEFAULT = 40
   const AUDIO_TRACK_HEIGHT_STEREO_DEFAULT = 80
   const TRACK_HEIGHT_MIN = 32
   const TRACK_HEIGHT_MAX = 220
-  const TRACK_HEIGHTS_STORAGE_KEY = 'comfystudio-timeline-track-heights-v1'
+  const TRACK_HEIGHTS_STORAGE_KEY = 'vidwright-timeline-track-heights-v1'
   const [trackHeadersWidth, setTrackHeadersWidth] = useState(() => {
     try {
       const w = localStorage.getItem(TRACK_HEADERS_STORAGE_KEY)
@@ -1942,7 +1942,7 @@ function Timeline({ onActiveToolChange }) {
       setIsScrubbing(false)
       // Let the preview renderer commit the precise frame immediately
       // instead of waiting out its scrub-settle timer.
-      window.dispatchEvent(new CustomEvent('comfystudio:timeline-scrub-end'))
+      window.dispatchEvent(new CustomEvent('vidwright:timeline-scrub-end'))
     }
 
     // Add listeners to window so dragging works even outside the timeline
@@ -2870,11 +2870,11 @@ function Timeline({ onActiveToolChange }) {
       setAssetDropPreview(null)
       clearActiveSnap()
     }
-    window.addEventListener('comfystudio-assets-drag-start', handleAssetDragStart)
-    window.addEventListener('comfystudio-assets-drag-end', handleAssetDragEnd)
+    window.addEventListener('vidwright-assets-drag-start', handleAssetDragStart)
+    window.addEventListener('vidwright-assets-drag-end', handleAssetDragEnd)
     return () => {
-      window.removeEventListener('comfystudio-assets-drag-start', handleAssetDragStart)
-      window.removeEventListener('comfystudio-assets-drag-end', handleAssetDragEnd)
+      window.removeEventListener('vidwright-assets-drag-start', handleAssetDragStart)
+      window.removeEventListener('vidwright-assets-drag-end', handleAssetDragEnd)
     }
   }, [clearActiveSnap, cancelPendingAssetDragOver])
 
@@ -2974,7 +2974,7 @@ function Timeline({ onActiveToolChange }) {
     if (Array.isArray(draggedAssetIds) && draggedAssetIds.length > 0) return draggedAssetIds
     if (!dataTransfer) return draggedAssetIds
     const directId = dataTransfer.getData('assetId')
-    const customPayload = dataTransfer.getData('application/x-comfystudio-asset-ids')
+    const customPayload = dataTransfer.getData('application/x-vidwright-asset-ids')
     const plainText = dataTransfer.getData('text/plain')
     const raw = customPayload || plainText
     if (!raw) {
@@ -4237,7 +4237,7 @@ function Timeline({ onActiveToolChange }) {
   }
   
   const parseTransitionDrop = (e) => {
-    const raw = e.dataTransfer.getData('application/x-comfystudio-transition')
+    const raw = e.dataTransfer.getData('application/x-vidwright-transition')
     if (!raw) return null
     try {
       return JSON.parse(raw)
@@ -4247,7 +4247,7 @@ function Timeline({ onActiveToolChange }) {
   }
 
   const parseEffectDrop = (e) => {
-    const raw = e.dataTransfer.getData('application/x-comfystudio-effect')
+    const raw = e.dataTransfer.getData('application/x-vidwright-effect')
     if (!raw) return null
     try {
       return JSON.parse(raw)
@@ -4264,8 +4264,8 @@ function Timeline({ onActiveToolChange }) {
         setDefaultTransitionFrames(Math.round(next))
       }
     }
-    window.addEventListener('comfystudio-transition-default-duration-changed', handler)
-    return () => window.removeEventListener('comfystudio-transition-default-duration-changed', handler)
+    window.addEventListener('vidwright-transition-default-duration-changed', handler)
+    return () => window.removeEventListener('vidwright-transition-default-duration-changed', handler)
   }, [])
   
   // Close transition menu when clicking outside

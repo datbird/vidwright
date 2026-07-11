@@ -203,8 +203,8 @@ function WelcomeScreen() {
     ? Math.round((mediaPreparationCompleted / mediaPreparationTotal) * 100)
     : 0
   const showMediaPreparation = Boolean(isLoading && mediaPreparation?.active && mediaPreparationTotal > 0)
-  const welcomeHeroVideoSrc = getWelcomeAssetPath('velorn-project-selection-page.mp4')
-  const welcomeHeroPosterSrc = getWelcomeAssetPath('velorn-home-balanced-plate-4.webp')
+  const welcomeHeroVideoSrc = getWelcomeAssetPath('vidwright-project-selection-page.mp4')
+  const welcomeHeroPosterSrc = getWelcomeAssetPath('vidwright-home-balanced-plate-4.webp')
   const desktopMode = isElectronMode()
   
   // Keep partner-key status fresh so the chip in the header reflects
@@ -476,7 +476,7 @@ function WelcomeScreen() {
           <div className="max-w-md w-full mx-4">
           {/* Branding */}
           <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold text-sf-text-primary">Velorn</h1>
+            <h1 className="text-4xl font-bold text-sf-text-primary">Vidwright</h1>
           </div>
           
           {/* Browser Support Warning - only show in web mode */}
@@ -487,7 +487,7 @@ function WelcomeScreen() {
                 <div>
                   <p className="text-sm text-sf-text-primary font-medium">Browser Not Supported</p>
                   <p className="text-xs text-sf-text-muted mt-1">
-                    Velorn requires the File System Access API. Please use Google Chrome or Microsoft Edge.
+                    Vidwright requires the File System Access API. Please use Google Chrome or Microsoft Edge.
                   </p>
                 </div>
               </div>
@@ -498,7 +498,7 @@ function WelcomeScreen() {
           <div className="bg-sf-dark-900 border border-sf-dark-700 rounded-xl p-6">
             <h2 className="text-lg font-semibold text-sf-text-primary mb-2 text-center">Set Up Your Workspace</h2>
             <p className="text-sm text-sf-text-muted mb-6">
-              Choose a folder where your Velorn projects and media will be stored. Each project will have its own subfolder with all assets and imported media organized inside.
+              Choose a folder where your Vidwright projects and media will be stored. Each project will have its own subfolder with all assets and imported media organized inside.
             </p>
             
             {/* Current Location Display */}
@@ -673,7 +673,7 @@ function WelcomeScreen() {
           </div>
           {/* Subtle attribution */}
           <div className="absolute bottom-3 right-4 text-[10px] uppercase tracking-wider text-white/40 pointer-events-none">
-            Made with Velorn
+            Made with Vidwright
           </div>
         </div>
       ) : null}

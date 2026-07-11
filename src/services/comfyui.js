@@ -20,37 +20,37 @@ import {
 } from '../config/musicVideoShotConfig'
 
 const COMFY_ORG_API_KEY_SETTING_KEY = 'comfyApiKeyComfyOrg';
-const COMFY_ORG_API_KEY_LOCAL_KEY = 'comfystudio-comfy-api-key';
+const COMFY_ORG_API_KEY_LOCAL_KEY = 'vidwright-comfy-api-key';
 const COMFY_BINARY_EVENT_TYPES = Object.freeze({
   TEXT: 3,
 })
 const UTF8_DECODER = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null
-// Canonical marker titles are VELORN_*; legacy COMFYSTUDIO_* titles from
+// Canonical marker titles are VIDWRIGHT_*; legacy COMFYSTUDIO_* titles from
 // graphs tagged before the rename still match (see endpointTitleAliases).
 export const CUSTOM_KEYFRAME_ENDPOINTS = Object.freeze({
-  inputImage: 'VELORN_INPUT_IMAGE',
-  prompt: 'VELORN_PROMPT',
-  seed: 'VELORN_SEED',
-  width: 'VELORN_WIDTH',
-  height: 'VELORN_HEIGHT',
-  referenceImage1: 'VELORN_REFERENCE_IMAGE_1',
-  referenceImage2: 'VELORN_REFERENCE_IMAGE_2',
-  outputImage: 'VELORN_OUTPUT_IMAGE',
+  inputImage: 'VIDWRIGHT_INPUT_IMAGE',
+  prompt: 'VIDWRIGHT_PROMPT',
+  seed: 'VIDWRIGHT_SEED',
+  width: 'VIDWRIGHT_WIDTH',
+  height: 'VIDWRIGHT_HEIGHT',
+  referenceImage1: 'VIDWRIGHT_REFERENCE_IMAGE_1',
+  referenceImage2: 'VIDWRIGHT_REFERENCE_IMAGE_2',
+  outputImage: 'VIDWRIGHT_OUTPUT_IMAGE',
 })
 export const CUSTOM_VIDEO_ENDPOINTS = Object.freeze({
-  inputImage: 'VELORN_INPUT_IMAGE',
-  prompt: 'VELORN_PROMPT',
-  seed: 'VELORN_SEED',
-  width: 'VELORN_WIDTH',
-  height: 'VELORN_HEIGHT',
-  fps: 'VELORN_FPS',
-  duration: 'VELORN_DURATION',
-  inputAudio: 'VELORN_AUDIO',
-  outputVideo: 'VELORN_OUTPUT_VIDEO',
+  inputImage: 'VIDWRIGHT_INPUT_IMAGE',
+  prompt: 'VIDWRIGHT_PROMPT',
+  seed: 'VIDWRIGHT_SEED',
+  width: 'VIDWRIGHT_WIDTH',
+  height: 'VIDWRIGHT_HEIGHT',
+  fps: 'VIDWRIGHT_FPS',
+  duration: 'VIDWRIGHT_DURATION',
+  inputAudio: 'VIDWRIGHT_AUDIO',
+  outputVideo: 'VIDWRIGHT_OUTPUT_VIDEO',
 })
-const VELORN_OUTPUT_RESIZE_TITLE = 'Velorn Output Resize'
-const LEGACY_COMFYSTUDIO_OUTPUT_RESIZE_TITLE = 'ComfyStudio Output Resize'
-const OUTPUT_RESIZE_TITLES = [VELORN_OUTPUT_RESIZE_TITLE, LEGACY_COMFYSTUDIO_OUTPUT_RESIZE_TITLE]
+const VIDWRIGHT_OUTPUT_RESIZE_TITLE = 'Vidwright Output Resize'
+const LEGACY_COMFYSTUDIO_OUTPUT_RESIZE_TITLE = 'Vidwright Output Resize'
+const OUTPUT_RESIZE_TITLES = [VIDWRIGHT_OUTPUT_RESIZE_TITLE, LEGACY_COMFYSTUDIO_OUTPUT_RESIZE_TITLE]
 
 function parseNumericLike(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -72,7 +72,7 @@ function normalizeEndpointTitle(value = '') {
 }
 
 function endpointTitleAliases(endpointName) {
-  return [endpointName, endpointName.replace(/^VELORN_/, 'COMFYSTUDIO_')]
+  return [endpointName, endpointName.replace(/^VIDWRIGHT_/, 'COMFYSTUDIO_')]
 }
 
 function titleMatchesEndpoint(title, endpointName) {
@@ -111,7 +111,7 @@ const REQUIRED_CUSTOM_VIDEO_ENDPOINT_KEYS = ['inputImage', 'prompt', 'outputVide
 
 /**
  * Pre-check a UI-format graph (as saved in the personal workflow library)
- * against a custom slot's VELORN node-title contract. Mirrors the
+ * against a custom slot's VIDWRIGHT node-title contract. Mirrors the
  * required markers of validateCustomKeyframeWorkflow /
  * validateCustomVideoWorkflow but reads LiteGraph `node.title`, so it can run
  * without converting the graph to API format first.
@@ -162,7 +162,7 @@ function inputRefEquals(value, nodeId, outputIndex = 0) {
 }
 
 function getUniqueWorkflowNodeId(workflow, preferredId) {
-  const base = String(preferredId || 'comfystudio_node')
+  const base = String(preferredId || 'vidwright_node')
   if (!workflow[base]) return base
   let suffix = 1
   while (workflow[`${base}_${suffix}`]) suffix += 1
@@ -206,7 +206,7 @@ export function addQwenImageEditResolutionControls(workflow, options = {}) {
   let widthNodeId = findNodeIdByTitle(workflow, CUSTOM_KEYFRAME_ENDPOINTS.width)
   let heightNodeId = findNodeIdByTitle(workflow, CUSTOM_KEYFRAME_ENDPOINTS.height)
   if (useEndpointNodes && !widthNodeId) {
-    widthNodeId = getUniqueWorkflowNodeId(workflow, 'comfystudio_width')
+    widthNodeId = getUniqueWorkflowNodeId(workflow, 'vidwright_width')
     workflow[widthNodeId] = {
       class_type: 'PrimitiveInt',
       inputs: { value: numericWidth },
@@ -214,7 +214,7 @@ export function addQwenImageEditResolutionControls(workflow, options = {}) {
     }
   }
   if (useEndpointNodes && !heightNodeId) {
-    heightNodeId = getUniqueWorkflowNodeId(workflow, 'comfystudio_height')
+    heightNodeId = getUniqueWorkflowNodeId(workflow, 'vidwright_height')
     workflow[heightNodeId] = {
       class_type: 'PrimitiveInt',
       inputs: { value: numericHeight },
@@ -224,11 +224,11 @@ export function addQwenImageEditResolutionControls(workflow, options = {}) {
 
   let resizeNodeId = findOutputResizeNodeId(workflow)
   if (!resizeNodeId) {
-    resizeNodeId = getUniqueWorkflowNodeId(workflow, 'comfystudio_output_resize')
+    resizeNodeId = getUniqueWorkflowNodeId(workflow, 'vidwright_output_resize')
     workflow[resizeNodeId] = {
       class_type: 'ImageScale',
       inputs: {},
-      _meta: { title: VELORN_OUTPUT_RESIZE_TITLE },
+      _meta: { title: VIDWRIGHT_OUTPUT_RESIZE_TITLE },
     }
   }
 
@@ -244,7 +244,7 @@ export function addQwenImageEditResolutionControls(workflow, options = {}) {
   }
   resizeNode._meta = {
     ...(resizeNode._meta || {}),
-    title: VELORN_OUTPUT_RESIZE_TITLE,
+    title: VIDWRIGHT_OUTPUT_RESIZE_TITLE,
   }
 
   const resizeRef = [resizeNodeId, 0]
@@ -261,14 +261,14 @@ export function addQwenImageEditResolutionControls(workflow, options = {}) {
   return workflow
 }
 
-function normalizeComfyStudioOutputResize(workflow) {
+function normalizeVidwrightOutputResize(workflow) {
   const resizeNodeId = findOutputResizeNodeId(workflow)
   const resizeNode = resizeNodeId ? workflow?.[resizeNodeId] : null
   if (resizeNode?.class_type === 'ImageScale' && resizeNode.inputs) {
     resizeNode.inputs.crop = 'center'
     resizeNode._meta = {
       ...(resizeNode._meta || {}),
-      title: VELORN_OUTPUT_RESIZE_TITLE,
+      title: VIDWRIGHT_OUTPUT_RESIZE_TITLE,
     }
   }
   return workflow
@@ -614,7 +614,7 @@ class ComfyUIService {
   }
 
   generateClientId() {
-    return 'comfystudio-' + Math.random().toString(36).substring(2, 15);
+    return 'vidwright-' + Math.random().toString(36).substring(2, 15);
   }
 
   getHttpBase() {
@@ -1346,7 +1346,7 @@ export function modifyMaskWorkflow(workflow, options = {}) {
   const {
     inputFilename = '',       // The uploaded filename in ComfyUI
     textPrompt = '',          // What to segment (e.g., "person on the left")
-    outputPrefix = 'VelornMask',  // Output filename prefix
+    outputPrefix = 'VidwrightMask',  // Output filename prefix
     scoreThreshold = 0.04,    // Detection sensitivity (lower = more sensitive)
     frameIdx = 0,             // Which frame to use for initial detection
   } = options;
@@ -1408,7 +1408,7 @@ export function modifyWAN22Workflow(workflow, options = {}) {
     frames = 81,
     fps = 16,
     seed = Math.floor(Math.random() * 1000000000000),
-    filenamePrefix = 'video/Velorn_wan',
+    filenamePrefix = 'video/Vidwright_wan',
     qualityPreset = 'balanced', // balanced | face-lock
   } = options
 
@@ -1806,11 +1806,11 @@ export function modifyMultipleAnglesWorkflow(workflow, options = {}) {
     }
   }
 
-  // Update save prefixes to Velorn
+  // Update save prefixes to Vidwright
   const saveNodes = { '31': 'close_up', '34': 'wide_shot', '36': '45_right', '38': '90_right', '47': '90_left', '41': 'aerial_view', '43': 'low_angle', '45': '45_left' }
   for (const [nodeId, suffix] of Object.entries(saveNodes)) {
     if (modified[nodeId]) {
-      modified[nodeId].inputs.filename_prefix = `Velorn-${suffix}`
+      modified[nodeId].inputs.filename_prefix = `Vidwright-${suffix}`
     }
   }
 
@@ -1822,10 +1822,10 @@ export function modifyMultipleAnglesWorkflow(workflow, options = {}) {
  *
  * Contract:
  * - Required node titles:
- *   VELORN_INPUT_IMAGE, VELORN_PROMPT, VELORN_OUTPUT_IMAGE
+ *   VIDWRIGHT_INPUT_IMAGE, VIDWRIGHT_PROMPT, VIDWRIGHT_OUTPUT_IMAGE
  * - Optional node titles:
- *   VELORN_SEED, VELORN_WIDTH, VELORN_HEIGHT,
- *   VELORN_REFERENCE_IMAGE_1, VELORN_REFERENCE_IMAGE_2
+ *   VIDWRIGHT_SEED, VIDWRIGHT_WIDTH, VIDWRIGHT_HEIGHT,
+ *   VIDWRIGHT_REFERENCE_IMAGE_1, VIDWRIGHT_REFERENCE_IMAGE_2
  */
 export function modifyCustomKeyframeWorkflow(workflow, options = {}) {
   const {
@@ -1873,7 +1873,7 @@ export function modifyCustomKeyframeWorkflow(workflow, options = {}) {
     endpoints.outputImage.node.inputs.filename_prefix = filenamePrefix || endpoints.outputImage.node.inputs.filename_prefix || 'image/custom_keyframe'
   }
 
-  normalizeComfyStudioOutputResize(modified)
+  normalizeVidwrightOutputResize(modified)
 
   return modified
 }
@@ -1883,10 +1883,10 @@ export function modifyCustomKeyframeWorkflow(workflow, options = {}) {
  *
  * Contract:
  * - Required node titles:
- *   VELORN_INPUT_IMAGE, VELORN_PROMPT, VELORN_OUTPUT_VIDEO
+ *   VIDWRIGHT_INPUT_IMAGE, VIDWRIGHT_PROMPT, VIDWRIGHT_OUTPUT_VIDEO
  * - Optional node titles:
- *   VELORN_SEED, VELORN_WIDTH, VELORN_HEIGHT,
- *   VELORN_FPS, VELORN_DURATION, VELORN_AUDIO
+ *   VIDWRIGHT_SEED, VIDWRIGHT_WIDTH, VIDWRIGHT_HEIGHT,
+ *   VIDWRIGHT_FPS, VIDWRIGHT_DURATION, VIDWRIGHT_AUDIO
  */
 export function modifyCustomVideoWorkflow(workflow, options = {}) {
   const {
@@ -1925,7 +1925,7 @@ export function modifyCustomVideoWorkflow(workflow, options = {}) {
     endpoints.outputVideo.node.inputs.filename_prefix = filenamePrefix || endpoints.outputVideo.node.inputs.filename_prefix || 'video/custom_music'
   }
 
-  normalizeComfyStudioOutputResize(modified)
+  normalizeVidwrightOutputResize(modified)
 
   return modified
 }
@@ -2009,7 +2009,7 @@ export function modifyQwenImageEdit2509Workflow(workflow, options = {}) {
     }
     // Save Image: set prefix
     if (cls === 'SaveImage' && node.inputs && 'filename_prefix' in node.inputs) {
-      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'image/Velorn_edit'
+      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'image/Vidwright_edit'
     }
   }
 
@@ -2098,10 +2098,10 @@ export function modifyLocalApiWorkflow(workflow, options = {}) {
     }
 
     if (cls === 'SaveImage' && 'filename_prefix' in node.inputs) {
-      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'image/velorn_local'
+      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'image/vidwright_local'
     }
     if (cls === 'SaveVideo' && 'filename_prefix' in node.inputs) {
-      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'video/velorn_local'
+      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'video/vidwright_local'
     }
 
     if (cls === 'CLIPTextEncode' && typeof node.inputs.text === 'string') {
@@ -3291,7 +3291,7 @@ export function modifyMusicWorkflow(workflow, options = {}) {
   }
   // Output prefix (node 107)
   if (modified['107']) {
-    modified['107'].inputs.filename_prefix = 'audio/Velorn'
+    modified['107'].inputs.filename_prefix = 'audio/Vidwright'
   }
 
   return modified

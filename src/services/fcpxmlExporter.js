@@ -215,7 +215,7 @@ function buildClipElement(item, timebase, timelineHeight) {
     : ''
   const enabledAttr = clip.enabled === false ? ' enabled="0"' : ''
   const laneAttr = lane ? ` lane="${lane}"` : ''
-  const note = `comfystudio:clipId=${clip.id};assetId=${asset.id};trackId=${track?.id || 'unknown'}`
+  const note = `vidwright:clipId=${clip.id};assetId=${asset.id};trackId=${track?.id || 'unknown'}`
   const adjustTransform = item.mediaRole === 'video' || item.mediaRole === 'image'
     ? buildAdjustTransformElement(clip, timelineHeight)
     : ''
@@ -231,7 +231,7 @@ function buildClipElement(item, timebase, timelineHeight) {
 }
 
 export function buildFcpXml({
-  projectName = 'Velorn Project',
+  projectName = 'Vidwright Project',
   timelineName = 'Timeline',
   timelineSettings = {},
   timeline = {},
@@ -271,11 +271,11 @@ export function buildFcpXml({
   const sequenceDurationFrames = Math.max(secondsToFrames(computedEnd || 1, timebase), 1)
   const formatId = 'r1'
   const resourceEntries = [
-    `    <format id="${formatId}" name="Velorn ${width}x${height} ${timebase.fps}fps" frameDuration="${timebase.frameDuration}" width="${width}" height="${height}" colorSpace="1-1-1 (Rec. 709)"/>`,
+    `    <format id="${formatId}" name="Vidwright ${width}x${height} ${timebase.fps}fps" frameDuration="${timebase.frameDuration}" width="${width}" height="${height}" colorSpace="1-1-1 (Rec. 709)"/>`,
     ...buildResourceEntries(exportClips, timebase, formatId),
   ]
   const clipElements = exportClips.map((item) => buildClipElement(item, timebase, height))
-  const safeProjectId = sanitizeId(projectName, 'comfystudio_project')
+  const safeProjectId = sanitizeId(projectName, 'vidwright_project')
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -285,11 +285,11 @@ export function buildFcpXml({
     ...resourceEntries,
     '  </resources>',
     '  <library>',
-    `    <event name="${escapeXml(sanitizeName(projectName, 'Velorn Project'))}">`,
+    `    <event name="${escapeXml(sanitizeName(projectName, 'Vidwright Project'))}">`,
     `      <project name="${escapeXml(sanitizeName(timelineName, 'Timeline'))}" uid="${escapeXml(safeProjectId)}">`,
     `        <sequence format="${formatId}" duration="${formatFrames(sequenceDurationFrames, timebase)}" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">`,
     '          <spine>',
-    `            <gap name="Velorn Timeline" offset="0s" start="0s" duration="${formatFrames(sequenceDurationFrames, timebase)}">`,
+    `            <gap name="Vidwright Timeline" offset="0s" start="0s" duration="${formatFrames(sequenceDurationFrames, timebase)}">`,
     ...clipElements,
     '            </gap>',
     '          </spine>',

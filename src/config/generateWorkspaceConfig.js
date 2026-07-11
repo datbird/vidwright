@@ -141,7 +141,7 @@ export const YOLO_MUSIC_KEYFRAME_WORKFLOW_OPTIONS = Object.freeze([
     id: CUSTOM_MUSIC_KEYFRAME_WORKFLOW_ID,
     label: 'Custom Workflow',
     runtimeLabel: 'Advanced',
-    description: 'Use your own ComfyUI keyframe workflow as long as it keeps the Velorn input/output endpoints.',
+    description: 'Use your own ComfyUI keyframe workflow as long as it keeps the Vidwright input/output endpoints.',
   },
 ])
 
@@ -160,7 +160,7 @@ export const YOLO_MUSIC_VIDEO_WORKFLOW_OPTIONS = Object.freeze([
     id: CUSTOM_MUSIC_VIDEO_WORKFLOW_ID,
     label: 'Custom Workflow',
     runtimeLabel: 'Advanced',
-    description: 'Use your own ComfyUI video workflow as long as it keeps the Velorn input/output endpoints.',
+    description: 'Use your own ComfyUI video workflow as long as it keeps the Vidwright input/output endpoints.',
   },
 ])
 
@@ -372,7 +372,7 @@ const WORKFLOW_DISPLAY_LABELS = Object.freeze({
   'mask-gen': 'Mask Generation',
 })
 
-export const OPEN_COMFY_TAB_EVENT = 'comfystudio-open-comfyui-tab'
+export const OPEN_COMFY_TAB_EVENT = 'vidwright-open-comfyui-tab'
 
 export const HARDWARE_TIERS = Object.freeze({
   lite: {

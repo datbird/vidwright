@@ -17,15 +17,15 @@ import {
 import lmstudio from '../services/lmstudio'
 import { getAgentToolInstructions, runAgentTool } from '../services/agentTools'
 
-const ACCEPTED_STORAGE_KEY = 'velorn-agent-disclaimer-accepted'
-const CHAT_STORAGE_KEY = 'velorn-agent-chat-history'
-const MODEL_STORAGE_KEY = 'velorn-agent-selected-model'
-const ENDPOINT_STORAGE_KEY = 'velorn-agent-endpoint'
+const ACCEPTED_STORAGE_KEY = 'vidwright-agent-disclaimer-accepted'
+const CHAT_STORAGE_KEY = 'vidwright-agent-chat-history'
+const MODEL_STORAGE_KEY = 'vidwright-agent-selected-model'
+const ENDPOINT_STORAGE_KEY = 'vidwright-agent-endpoint'
 const DEFAULT_ENDPOINT = 'http://localhost:1234'
 
-const BASE_AGENT_PROMPT = `You are Velorn Agent, an AI assistant built into Velorn.
+const BASE_AGENT_PROMPT = `You are Vidwright Agent, an AI assistant built into Vidwright.
 
-You help the user inspect and operate the open Velorn project using the Velorn tools available to you.
+You help the user inspect and operate the open Vidwright project using the Vidwright tools available to you.
 
 Speak like a friendly creative assistant, not like a developer console. Default to short answers: 1-3 sentences unless the user asks for details. Put the direct answer first. When the user asks a question that needs project context, use read tools first. When the user asks you to modify the project, prefer previewOnly true first unless the user clearly asks you to apply the change. If a tool changes the project, tell the user exactly what changed and what to verify.
 
@@ -87,7 +87,7 @@ function sanitizeToolResult(value) {
 function formatToolResultForChat(toolName, result, summary = '') {
   const sanitized = sanitizeToolResult(result)
   return [
-    `Velorn tool result for ${toolName}:`,
+    `Vidwright tool result for ${toolName}:`,
     summary ? `Summary: ${summary}` : '',
     `Technical result JSON:\n${JSON.stringify(sanitized, null, 2)}`,
   ].filter(Boolean).join('\n')
@@ -95,7 +95,7 @@ function formatToolResultForChat(toolName, result, summary = '') {
 
 function parseAgentToolCalls(text) {
   const calls = []
-  const blockPattern = /```(?:velorn-tool|velorn_tool)\s*([\s\S]*?)```/gi
+  const blockPattern = /```(?:vidwright-tool|vidwright_tool)\s*([\s\S]*?)```/gi
   let match
   while ((match = blockPattern.exec(text || '')) !== null) {
     const body = match[1].trim()
@@ -115,7 +115,7 @@ function parseAgentToolCalls(text) {
 
 function cleanAssistantText(text) {
   let cleaned = String(text || '')
-  cleaned = cleaned.replace(/```(?:velorn-tool|velorn_tool)\s*[\s\S]*?```/gi, '')
+  cleaned = cleaned.replace(/```(?:vidwright-tool|vidwright_tool)\s*[\s\S]*?```/gi, '')
   cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '')
   cleaned = cleaned.replace(/<\|(?:analysis|thought|reasoning)\|>[\s\S]*?(?=<\|(?:final|answer|assistant)\|>|$)/gi, '')
   cleaned = cleaned.replace(/<\|(?:final|answer|assistant)\|>/gi, '')
@@ -125,10 +125,10 @@ function cleanAssistantText(text) {
   cleaned = cleaned.replace(/<channel>\s*(?:thought|analysis|reasoning)[\s\S]*?(?=<channel>\s*(?:final|answer|assistant)|$)/gi, '')
   cleaned = cleaned.replace(/<channel>\s*(?:final|answer|assistant)\s*/gi, '')
   cleaned = cleaned.replace(/<\/?channel[^>]*>/gi, '')
-  cleaned = cleaned.replace(/Velorn tool result for [\s\S]*$/gi, '')
+  cleaned = cleaned.replace(/Vidwright tool result for [\s\S]*$/gi, '')
   cleaned = cleaned.replace(/^\s*(?:tool call|tool use)\s*:?.*$/gim, '')
   cleaned = cleaned.replace(/^\s*\d+\.\s*\*\*Tool Call\*\*[\s\S]*$/gim, '')
-  cleaned = cleaned.replace(/^\s*["']?velorn-tool["']?\s*$/gim, '')
+  cleaned = cleaned.replace(/^\s*["']?vidwright-tool["']?\s*$/gim, '')
   cleaned = cleaned.replace(/^\s*["']?tool["']?\s*:\s*["'][^"']+["'].*$/gim, '')
   cleaned = cleaned.replace(/^\s*["']?arguments["']?\s*:\s*\{.*$/gim, '')
   cleaned = cleaned.replace(/^\s*(?:I should|I need to|The user is asking|The user asked|I have the result|The summary states|I will state|We need to).*$/gim, '')
@@ -165,7 +165,7 @@ function shouldUseToolSummary(response) {
   const text = String(response || '').trim()
   if (!text) return true
   if (text.length > 900) return true
-  if (/```|<channel>|<think>|Velorn tool result|Technical result JSON/i.test(text)) return true
+  if (/```|<channel>|<think>|Vidwright tool result|Technical result JSON/i.test(text)) return true
   if (/"tool"\s*:|\"arguments\"\s*:|^\s*\{[\s\S]*\}\s*$/m.test(text)) return true
   return false
 }
@@ -397,7 +397,7 @@ function AgentWorkspace() {
         })
         resultMessages.push(toolMessage)
       } catch (error) {
-        resultMessages.push(makeMessage('tool', `Velorn tool error for ${toolName}:\n${error.message || String(error)}`, {
+        resultMessages.push(makeMessage('tool', `Vidwright tool error for ${toolName}:\n${error.message || String(error)}`, {
           toolName,
           status: 'error',
           summary: `${toolName} failed.`,
@@ -452,7 +452,7 @@ function AgentWorkspace() {
     const toolResult = await executeToolCalls(toolCalls, nextMessages)
     nextMessages = toolResult.nextMessages
 
-    const summaryPrompt = `Do not call any tools in this response. Do not reveal chain-of-thought or mention JSON/tool blocks. Summarize the Velorn tool results in plain English in 1-2 sentences. Put the answer first. If the user asked a simple count, answer the count first. If a tool was previewOnly, say that nothing was applied yet and what the user should approve next.`
+    const summaryPrompt = `Do not call any tools in this response. Do not reveal chain-of-thought or mention JSON/tool blocks. Summarize the Vidwright tool results in plain English in 1-2 sentences. Put the answer first. If the user asked a simple count, answer the count first. If a tool was previewOnly, say that nothing was applied yet and what the user should approve next.`
     const summary = cleanAssistantText(await streamAssistantMessage(nextMessages, summaryPrompt, {
       temperature: 0.1,
       max_tokens: 350,
@@ -531,7 +531,7 @@ function AgentWorkspace() {
             </div>
             <div>
               <h1 className="text-lg font-semibold">Agent</h1>
-              <p className="text-xs text-sf-text-muted">Local AI control for the open Velorn project.</p>
+              <p className="text-xs text-sf-text-muted">Local AI control for the open Vidwright project.</p>
             </div>
           </div>
         </div>
@@ -622,9 +622,9 @@ function AgentWorkspace() {
       <main className="relative flex min-w-0 flex-1 flex-col bg-[radial-gradient(circle_at_top,rgba(117,92,255,0.12),transparent_40%),#05070d]">
         <div className="flex items-center justify-between border-b border-sf-dark-700 bg-black/25 px-5 py-3">
           <div>
-            <h2 className="text-sm font-semibold">Velorn Agent</h2>
+            <h2 className="text-sm font-semibold">Vidwright Agent</h2>
             <p className="text-xs text-sf-text-muted">
-              Ask a local model to inspect, plan, preview, and operate the current project through Velorn tools.
+              Ask a local model to inspect, plan, preview, and operate the current project through Vidwright tools.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -651,16 +651,16 @@ function AgentWorkspace() {
                 </div>
                 <div>
                   <h3 className="text-lg font-semibold">Enable Agent Mode</h3>
-                  <p className="text-sm text-sf-text-muted">This gives a local AI model tool access to the open Velorn project.</p>
+                  <p className="text-sm text-sf-text-muted">This gives a local AI model tool access to the open Vidwright project.</p>
                 </div>
               </div>
               <div className="space-y-3 text-sm leading-relaxed text-sf-text-secondary">
                 <p>
                   Agent Mode can inspect and modify your project when you ask it to. It can create clips, add tracks,
-                  label clips, add markers, change keyframes, queue generations, and start exports through Velorn tools.
+                  label clips, add markers, change keyframes, queue generations, and start exports through Vidwright tools.
                 </p>
                 <p>
-                  It does not expose generic shell, operating-system, or arbitrary file tools from Velorn. Still, for important
+                  It does not expose generic shell, operating-system, or arbitrary file tools from Vidwright. Still, for important
                   work, duplicate the project first and ask the agent to preview or explain changes before applying them.
                 </p>
               </div>
@@ -696,7 +696,7 @@ function AgentWorkspace() {
               </div>
               <h3 className="mb-2 text-xl font-semibold">Talk to your edit.</h3>
               <p className="text-sm leading-relaxed text-sf-text-muted">
-                Start with a question, a review pass, or a preview-only edit. The model will call Velorn tools when it needs project context or editor control.
+                Start with a question, a review pass, or a preview-only edit. The model will call Vidwright tools when it needs project context or editor control.
               </p>
             </div>
           ) : (

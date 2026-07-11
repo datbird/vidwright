@@ -238,7 +238,7 @@ export async function enqueueProxyTranscode(projectDir, assetId, sourcePath, opt
  * Kept in a pure helper so both the renderer (VideoLayerRenderer) and the
  * UI toggle (PreviewPanel) read from the same key.
  */
-export const PROXY_PLAYBACK_ENABLED_KEY = 'comfystudio-use-playback-proxies'
+export const PROXY_PLAYBACK_ENABLED_KEY = 'vidwright-use-playback-proxies'
 
 export function isProxyPlaybackEnabled() {
   if (typeof localStorage === 'undefined') return false

@@ -328,7 +328,7 @@ export default function GenerateMusicPopover({ onClose, anchorRect = null }) {
           {setupFlow.mode === 'choose-root' ? (
             <>
               <p className="mb-1.5 text-[10px] text-amber-200/90">
-                The ACE-Step music model isn't set up yet. Point Velorn at your ComfyUI folder to download it.
+                The ACE-Step music model isn't set up yet. Point Vidwright at your ComfyUI folder to download it.
               </p>
               <button
                 onClick={setupFlow.chooseComfyFolder}

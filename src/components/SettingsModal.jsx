@@ -53,10 +53,10 @@ import {
   setGenerationCompletionSoundSettings,
 } from '../services/generationCompletionSoundSettings'
 
-const AUTO_IMPORT_KEY = 'comfystudio-auto-import-comfy-outputs'
+const AUTO_IMPORT_KEY = 'vidwright-auto-import-comfy-outputs'
 const OUTPUT_DIRECTORY_SETTING_KEY = 'outputDirectory'
 const WORKFLOWS_DIRECTORY_SETTING_KEY = 'workflowsDirectory'
-const OUTPUT_DIRECTORY_PLACEHOLDER = 'C:\\Users\\...\\Velorn\\outputs'
+const OUTPUT_DIRECTORY_PLACEHOLDER = 'C:\\Users\\...\\Vidwright\\outputs'
 const WORKFLOWS_DIRECTORY_PLACEHOLDER = 'C:\\Users\\...\\ComfyUI\\workflow_API'
 
 const SETTINGS_SECTIONS = [
@@ -88,7 +88,7 @@ const SETTINGS_SECTIONS = [
     id: 'launcher',
     title: 'ComfyUI Launcher',
     icon: Power,
-    description: 'Let Velorn start, stop, and restart your local ComfyUI process.',
+    description: 'Let Vidwright start, stop, and restart your local ComfyUI process.',
   },
   {
     id: 'paths',
@@ -750,7 +750,7 @@ function GeneralTab({ initialSection = null }) {
           <div className="flex items-center justify-between rounded-lg border border-sf-dark-700 bg-sf-dark-900/60 px-3 py-3">
             <div>
               <label className="text-sm text-sf-text-primary">Reopen last project on startup</label>
-              <p className="text-[10px] text-sf-text-muted">When off, Velorn opens to the project picker.</p>
+              <p className="text-[10px] text-sf-text-muted">When off, Vidwright opens to the project picker.</p>
             </div>
             <button
               onClick={() => setReopenLastProjectOnStartup(!reopenLastProjectOnStartup)}
@@ -923,14 +923,14 @@ function GeneralTab({ initialSection = null }) {
       break
     case 'agents': {
       const mcpUrl = mcpStatus?.url || 'http://127.0.0.1:19790/mcp'
-      const codexCommand = `codex mcp add velorn --url ${mcpUrl}`
-      const claudeCommand = `claude mcp add --transport http velorn ${mcpUrl}`
+      const codexCommand = `codex mcp add vidwright --url ${mcpUrl}`
+      const claudeCommand = `claude mcp add --transport http vidwright ${mcpUrl}`
       activeSectionContent = (
         <div className="space-y-4">
           <div className="rounded-lg border border-sf-dark-700 bg-sf-dark-900/60 px-3 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-sm font-medium text-sf-text-primary">Velorn MCP server</div>
+                <div className="text-sm font-medium text-sf-text-primary">Vidwright MCP server</div>
                 <p className="mt-1 text-[11px] text-sf-text-muted">
                   Local project access for AI agents. Agents can inspect and review the open project, troubleshoot local ComfyUI setup, use limited undoable timeline/text/effect actions, and start delivery exports.
                 </p>
@@ -1005,7 +1005,7 @@ function GeneralTab({ initialSection = null }) {
           <div className="rounded-lg border border-sf-dark-700 bg-sf-dark-900/60 px-3 py-3">
             <div className="text-xs font-semibold text-sf-text-primary">Available tools</div>
             <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-sf-text-secondary">
-              {['get_project', 'create_project', 'duplicate_project', 'get_timeline', 'get_assets', 'get_ai_review_passes', 'get_mcp_recipes', 'find_timeline_items', 'check_media_health', 'inspect_export_file', 'guide_comfyui_setup', 'diagnose_comfyui_connection', 'set_comfyui_connection', 'repair_comfyui_connection', 'control_comfyui_launcher', 'get_comfyui_launcher_logs', 'validate_comfyui_nodes', 'list_velorn_workflows', 'inspect_velorn_workflow', 'check_export_readiness', 'inspect_clip', 'inspect_timeline_frame', 'prepare_generation_from_timeline_context', 'queue_prepared_generation', 'queue_timeline_generation_batch', 'queue_prompt_generation_batch', 'inspect_timeline_range', 'inspect_visible_shots', 'get_generation_status', 'get_music_video_status', 'analyze_timeline', 'analyze_music_video_workflow', 'undo', 'redo', 'set_playhead', 'select_clips', 'select_assets', 'create_project_checkpoint', 'restore_project_checkpoint', 'set_in_out_range', 'run_mcp_action_plan', 'import_asset_from_path', 'relink_asset', 'set_clip_style', 'set_clip_label_color', 'set_clips_enabled', 'add_timeline_markers', 'remove_timeline_markers', 'set_timeline_marker_properties', 'create_timeline', 'switch_timeline', 'rename_timeline', 'duplicate_timeline', 'delete_timeline', 'create_asset_folder', 'move_assets_to_folder', 'move_unused_assets_to_folder', 'add_track', 'update_track', 'remove_track', 'add_transition', 'update_transition', 'remove_transitions', 'move_clips', 'trim_clips', 'delete_clips', 'add_asset_to_timeline', 'add_assets_to_timeline', 'replace_clip_with_asset', 'add_solid_color', 'add_adjustment_clip', 'add_text_clip', 'add_shape_clip', 'duplicate_clip', 'update_text_clip', 'update_shape_clip', 'list_glsl_effects', 'add_glsl_effect', 'update_glsl_effect', 'remove_glsl_effect', 'set_clip_keyframes', 'add_dip_to_black', 'export_timeline', 'export_delivery_batch', 'export_fcpxml'].map((tool) => (
+              {['get_project', 'create_project', 'duplicate_project', 'get_timeline', 'get_assets', 'get_ai_review_passes', 'get_mcp_recipes', 'find_timeline_items', 'check_media_health', 'inspect_export_file', 'guide_comfyui_setup', 'diagnose_comfyui_connection', 'set_comfyui_connection', 'repair_comfyui_connection', 'control_comfyui_launcher', 'get_comfyui_launcher_logs', 'validate_comfyui_nodes', 'list_vidwright_workflows', 'inspect_vidwright_workflow', 'check_export_readiness', 'inspect_clip', 'inspect_timeline_frame', 'prepare_generation_from_timeline_context', 'queue_prepared_generation', 'queue_timeline_generation_batch', 'queue_prompt_generation_batch', 'inspect_timeline_range', 'inspect_visible_shots', 'get_generation_status', 'get_music_video_status', 'analyze_timeline', 'analyze_music_video_workflow', 'undo', 'redo', 'set_playhead', 'select_clips', 'select_assets', 'create_project_checkpoint', 'restore_project_checkpoint', 'set_in_out_range', 'run_mcp_action_plan', 'import_asset_from_path', 'relink_asset', 'set_clip_style', 'set_clip_label_color', 'set_clips_enabled', 'add_timeline_markers', 'remove_timeline_markers', 'set_timeline_marker_properties', 'create_timeline', 'switch_timeline', 'rename_timeline', 'duplicate_timeline', 'delete_timeline', 'create_asset_folder', 'move_assets_to_folder', 'move_unused_assets_to_folder', 'add_track', 'update_track', 'remove_track', 'add_transition', 'update_transition', 'remove_transitions', 'move_clips', 'trim_clips', 'delete_clips', 'add_asset_to_timeline', 'add_assets_to_timeline', 'replace_clip_with_asset', 'add_solid_color', 'add_adjustment_clip', 'add_text_clip', 'add_shape_clip', 'duplicate_clip', 'update_text_clip', 'update_shape_clip', 'list_glsl_effects', 'add_glsl_effect', 'update_glsl_effect', 'remove_glsl_effect', 'set_clip_keyframes', 'add_dip_to_black', 'export_timeline', 'export_delivery_batch', 'export_fcpxml'].map((tool) => (
                 <span key={tool} className="rounded bg-sf-dark-800 px-2 py-1">{tool}</span>
               ))}
             </div>

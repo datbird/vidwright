@@ -44,8 +44,8 @@ import { captureTimelineFrameAt } from '../utils/captureTimelineFrame'
 import { isElectron, writeGeneratedOverlayToProject } from '../services/fileSystem'
 
 const MOG_FOLDER_NAME = 'MoGraph Rendered Assets'
-const MOG_FAVORITES_STORAGE_KEY = 'comfystudio-mog-favorite-presets'
-const MOG_RECENTS_STORAGE_KEY = 'comfystudio-mog-recent-presets'
+const MOG_FAVORITES_STORAGE_KEY = 'vidwright-mog-favorite-presets'
+const MOG_RECENTS_STORAGE_KEY = 'vidwright-mog-recent-presets'
 const MAX_RECENT_PRESETS = 8
 const MOTION_FAMILY_LABELS = {
   slide: 'Slide',

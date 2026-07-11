@@ -19,7 +19,7 @@ import {
 // Maximum number of undo states to keep
 const MAX_HISTORY_SIZE = 50
 const MIN_TRANSITION_DURATION = 1 / FRAME_RATE
-const TRIM_DEBUG_KEY = 'comfystudio-debug-trim'
+const TRIM_DEBUG_KEY = 'vidwright-debug-trim'
 const KEYFRAME_TIME_TOLERANCE = 0.05
 // Frame-aware match window (half a frame, capped at the legacy 0.05s).
 const keyframeToleranceForFps = (fps) => getKeyframeTimeTolerance(fps || FRAME_RATE)
@@ -714,13 +714,13 @@ export const useTimelineStore = create(
   // Per-asset low-res proxy preference. When true, VideoLayerRenderer prefers
   // asset.proxyUrl over asset.playbackCacheUrl/url for preview only. Export
   // always uses asset.path. Hydrated from localStorage on boot in PreviewPanel.
-  useProxyPlaybackForAssets: (typeof localStorage !== 'undefined' && localStorage.getItem('comfystudio-use-playback-proxies') === 'true'),
-  glslPreviewQuality: (typeof localStorage !== 'undefined' && localStorage.getItem('comfystudio-glsl-preview-quality')) || 'full',
+  useProxyPlaybackForAssets: (typeof localStorage !== 'undefined' && localStorage.getItem('vidwright-use-playback-proxies') === 'true'),
+  glslPreviewQuality: (typeof localStorage !== 'undefined' && localStorage.getItem('vidwright-glsl-preview-quality')) || 'full',
   // 'gpu' composites the preview through the shared WebGL2 compositor
   // (services/gpuCompositor.js — same engine as export); 'canvas' is the
   // 2D fallback / kill switch. A stored explicit choice is respected.
-  previewCompositorMode: (typeof localStorage !== 'undefined' && localStorage.getItem('comfystudio-preview-compositor-mode')) || 'gpu',
-  showTimelineClipThumbnails: (typeof localStorage === 'undefined' || localStorage.getItem('comfystudio-show-timeline-clip-thumbnails') !== 'false'),
+  previewCompositorMode: (typeof localStorage !== 'undefined' && localStorage.getItem('vidwright-preview-compositor-mode')) || 'gpu',
+  showTimelineClipThumbnails: (typeof localStorage === 'undefined' || localStorage.getItem('vidwright-show-timeline-clip-thumbnails') !== 'false'),
   
   // Snapping settings
   snappingEnabled: true,
@@ -3724,28 +3724,28 @@ export const useTimelineStore = create(
   setUseProxyPlaybackForAssets: (enabled) => {
     set({ useProxyPlaybackForAssets: Boolean(enabled) })
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('comfystudio-use-playback-proxies', enabled ? 'true' : 'false')
+      localStorage.setItem('vidwright-use-playback-proxies', enabled ? 'true' : 'false')
     }
   },
   setGlslPreviewQuality: (quality) => {
     const normalized = ['full', 'half', 'quarter', 'eighth'].includes(quality) ? quality : 'full'
     set({ glslPreviewQuality: normalized })
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('comfystudio-glsl-preview-quality', normalized)
+      localStorage.setItem('vidwright-glsl-preview-quality', normalized)
     }
   },
   setPreviewCompositorMode: (mode) => {
     const normalized = ['canvas', 'dom', 'gpu'].includes(mode) ? mode : 'gpu'
     set({ previewCompositorMode: normalized })
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('comfystudio-preview-compositor-mode', normalized)
+      localStorage.setItem('vidwright-preview-compositor-mode', normalized)
     }
   },
   setShowTimelineClipThumbnails: (enabled) => {
     const next = Boolean(enabled)
     set({ showTimelineClipThumbnails: next })
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('comfystudio-show-timeline-clip-thumbnails', next ? 'true' : 'false')
+      localStorage.setItem('vidwright-show-timeline-clip-thumbnails', next ? 'true' : 'false')
     }
   },
   setPreviewProxyInvalid: () => {
@@ -5383,7 +5383,7 @@ export const useTimelineStore = create(
   }
     }),
     {
-      name: 'comfystudio-timeline', // localStorage key
+      name: 'vidwright-timeline', // localStorage key
       partialize: (state) => ({
         // Only persist these fields (exclude transient UI state)
         duration: state.duration,

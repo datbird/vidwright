@@ -113,7 +113,7 @@ const CAPTION_FONT_OPTIONS = [
   { id: 'Mono', label: 'Mono', value: 'Courier New' },
 ]
 
-const SAVED_CAPTION_STYLES_KEY = 'comfystudio-saved-caption-styles'
+const SAVED_CAPTION_STYLES_KEY = 'vidwright-saved-caption-styles'
 
 const VALID_VERTICAL_PLACEMENTS = new Set(CUE_VERTICAL_OPTIONS.map((option) => option.id))
 const VALID_HORIZONTAL_PLACEMENTS = new Set(CUE_HORIZONTAL_OPTIONS.map((option) => option.id))

@@ -146,14 +146,14 @@ function resolveMcpGenerationResolution(payload = {}) {
 }
 
 function sanitizeExportBaseName(value) {
-  return String(value || 'Velorn_Timeline')
+  return String(value || 'Vidwright_Timeline')
     .trim()
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
     .replace(/\s+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 120)
-    || 'Velorn_Timeline'
+    || 'Vidwright_Timeline'
 }
 
 function isAbsoluteMcpFilePath(filePath) {
@@ -301,7 +301,7 @@ async function buildCreateProjectPlan(payload = {}) {
   const fps = normalizeProjectFps(payload.fps, projectState.defaultFps ?? FPS_PRESETS.find((item) => item.value === 24)?.value ?? 24)
   const defaultProjectsHandle = projectState.defaultProjectsHandle
   if (!defaultProjectsHandle) {
-    throw new Error('No default projects folder is set. Choose a projects folder in Velorn before creating projects through MCP.')
+    throw new Error('No default projects folder is set. Choose a projects folder in Vidwright before creating projects through MCP.')
   }
 
   const targetPath = await resolveProjectPath(defaultProjectsHandle, name)
@@ -547,7 +547,7 @@ async function buildDuplicateProjectPlan(payload = {}) {
       path: predictedPath,
     },
     willOpenDuplicate: true,
-    note: 'Uses Velorn duplicate behavior: copies the whole project folder, remaps saved paths, creates a sibling "copy" project, and opens it.',
+    note: 'Uses Vidwright duplicate behavior: copies the whole project folder, remaps saved paths, creates a sibling "copy" project, and opens it.',
   }
 }
 
@@ -1135,7 +1135,7 @@ function buildEffectClipSummary(clip) {
 function getClipByIdForEffects(state, clipId) {
   const selectedIds = Array.isArray(state.selectedClipIds) ? state.selectedClipIds.filter(Boolean) : []
   const id = String(clipId || '').trim() || (selectedIds.length === 1 ? selectedIds[0] : '')
-  if (!id) throw new Error('Provide clipId for the target clip, or select exactly one visual clip in Velorn.')
+  if (!id) throw new Error('Provide clipId for the target clip, or select exactly one visual clip in Vidwright.')
   const clip = (state.clips || []).find((candidate) => candidate.id === id)
   if (!clip) throw new Error(`Clip ${id} was not found.`)
   const clipType = String(clip.type || '').toLowerCase()
@@ -1874,7 +1874,7 @@ async function handlePrepareGenerationFromTimelineContext(payload = {}) {
   useFrameForAIStore.getState().setFrame(framePayload)
 
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('comfystudio-mcp-prepare-generation', {
+    window.dispatchEvent(new CustomEvent('vidwright-mcp-prepare-generation', {
       detail: {
         mode,
         workflowId,
@@ -1892,7 +1892,7 @@ async function handlePrepareGenerationFromTimelineContext(payload = {}) {
       },
     }))
     if (payload.openGenerateTab !== false) {
-      window.dispatchEvent(new CustomEvent('comfystudio-open-generate-with-frame'))
+      window.dispatchEvent(new CustomEvent('vidwright-open-generate-with-frame'))
     }
   }
 
@@ -1937,7 +1937,7 @@ async function handleQueuePreparedGeneration(payload = {}) {
       finish(reject, new Error('Generate workspace did not respond to the MCP queue request. Open the Generate tab and try again.'))
     }, timeoutMs)
 
-    window.dispatchEvent(new CustomEvent('comfystudio-mcp-queue-prepared-generation', {
+    window.dispatchEvent(new CustomEvent('vidwright-mcp-queue-prepared-generation', {
       detail: {
         ...payload,
         respond: (result = {}) => {
@@ -1995,7 +1995,7 @@ async function handleQueueTimelineGenerationBatch(payload = {}) {
       finish(reject, new Error('Generate workspace did not respond to the MCP batch queue request. Open the Generate tab and try again.'))
     }, timeoutMs)
 
-    window.dispatchEvent(new CustomEvent('comfystudio-mcp-queue-timeline-generation-batch', {
+    window.dispatchEvent(new CustomEvent('vidwright-mcp-queue-timeline-generation-batch', {
       detail: {
         ...payload,
         capturedFrame: prepared?.capturedFrame || null,
@@ -2030,7 +2030,7 @@ async function handleQueueTimelineTemplateGeneration(payload = {}) {
       finish(reject, new Error('Generate workspace did not respond to the MCP template generation request. Open the Generate tab and try again.'))
     }, timeoutMs)
 
-    window.dispatchEvent(new CustomEvent('comfystudio-mcp-queue-template-generation', {
+    window.dispatchEvent(new CustomEvent('vidwright-mcp-queue-template-generation', {
       detail: {
         ...payload,
         respond: (result = {}) => {
@@ -2223,7 +2223,7 @@ async function handleInstallWorkflowSetup(payload = {}) {
     return { success: true, message: 'Nothing to install — dependencies are satisfied or manual-only.', plan: planSummary }
   }
   if (!rootValidation.isValid) {
-    throw new Error(rootValidation.error || 'The ComfyUI folder is not configured or failed validation — set it in Velorn first.')
+    throw new Error(rootValidation.error || 'The ComfyUI folder is not configured or failed validation — set it in Vidwright first.')
   }
 
   const job = startWorkflowInstall({
@@ -2437,7 +2437,7 @@ async function handleQueuePromptGenerationBatch(payload = {}) {
       finish(reject, new Error('Generate workspace did not respond to the MCP prompt batch queue request. Open the Generate tab and try again.'))
     }, timeoutMs)
 
-    window.dispatchEvent(new CustomEvent('comfystudio-mcp-queue-prompt-generation-batch', {
+    window.dispatchEvent(new CustomEvent('vidwright-mcp-queue-prompt-generation-batch', {
       detail: {
         ...payload,
         respond: (result = {}) => {
@@ -3543,7 +3543,7 @@ function handleRemoveTrack(payload = {}) {
   }
 
   const removed = state.removeTrack?.(trackId)
-  if (!removed) throw new Error('Could not remove the track. Velorn may be protecting the last track of that type.')
+  if (!removed) throw new Error('Could not remove the track. Vidwright may be protecting the last track of that type.')
   return {
     removed: true,
     trackId,
@@ -3654,7 +3654,7 @@ function handleDeleteTimeline(payload = {}) {
   }
 
   const deleted = projectState.deleteTimeline?.(timelineId)
-  if (!deleted) throw new Error('Could not delete the timeline. Velorn may be protecting the last sequence.')
+  if (!deleted) throw new Error('Could not delete the timeline. Vidwright may be protecting the last sequence.')
   return {
     deleted: true,
     timelineId,
@@ -6375,7 +6375,7 @@ async function handleExportTimeline(payload = {}) {
   const format = String(payload.format || 'mp4').toLowerCase() === 'mp4' ? 'mp4' : 'mp4'
   const videoCodec = String(payload.videoCodec || 'h264').toLowerCase() === 'h265' ? 'h265' : 'h264'
   const outputExtension = 'mp4'
-  const filename = sanitizeExportBaseName(payload.filename || `${project.name || 'Velorn'}_export`)
+  const filename = sanitizeExportBaseName(payload.filename || `${project.name || 'Vidwright'}_export`)
   const outputFolder = await api.pathJoin(projectPath, 'renders')
   await api.createDirectory(outputFolder)
   const defaultOutputPath = await api.pathJoin(outputFolder, `${filename}_${Date.now()}.${outputExtension}`)
@@ -6519,7 +6519,7 @@ async function handleExportFcpXml(payload = {}) {
     ? timelineState.getTimelineEndTime()
     : getTimelineEndTimeForMcp(timelineState.clips || [], timelineState.duration || currentTimeline?.duration || 0)
   const xml = buildFcpXml({
-    projectName: project.name || 'Velorn Project',
+    projectName: project.name || 'Vidwright Project',
     timelineName,
     timelineSettings: { width, height, fps },
     timeline: {
@@ -6537,7 +6537,7 @@ async function handleExportFcpXml(payload = {}) {
   const outputPath = String(payload.outputPath || '').trim()
     || await api.pathJoin(
       outputFolder,
-      `${sanitizeExportBaseName(payload.filename || `${project.name || 'Velorn'}_${timelineName}`)}_${Date.now()}.fcpxml`
+      `${sanitizeExportBaseName(payload.filename || `${project.name || 'Vidwright'}_${timelineName}`)}_${Date.now()}.fcpxml`
     )
   const writeResult = await api.writeFile(outputPath, xml, { encoding: 'utf8' })
   if (!writeResult?.success) {
@@ -7345,7 +7345,7 @@ function handleCreateProjectCheckpoint(payload = {}) {
     label: checkpoint.label,
     createdAt: checkpoint.createdAt,
     checkpointCount: MCP_PROJECT_CHECKPOINTS.size,
-    message: 'Created an in-memory MCP project checkpoint for this Velorn session.',
+    message: 'Created an in-memory MCP project checkpoint for this Vidwright session.',
   }
 }
 
@@ -7423,7 +7423,7 @@ async function handleRestoreProjectCheckpoint(payload = {}) {
     savedProject: Boolean(savedProject),
     message: savedProject
       ? 'Restored the MCP checkpoint and saved the project file.'
-      : 'Restored the MCP checkpoint in the open Velorn session.',
+      : 'Restored the MCP checkpoint in the open Vidwright session.',
   }
 }
 
@@ -7447,7 +7447,7 @@ async function resolveMcpFolderIdForImportedAsset(payload = {}) {
 async function handleImportAssetFromPath(payload = {}) {
   const sourcePath = String(payload.path || payload.filePath || payload.sourcePath || '').trim()
   if (!sourcePath) throw new Error('Provide path, filePath, or sourcePath for import_asset_from_path.')
-  if (!useProjectStore.getState().currentProjectHandle) throw new Error('Open a saved Velorn project before importing assets.')
+  if (!useProjectStore.getState().currentProjectHandle) throw new Error('Open a saved Vidwright project before importing assets.')
   if (!isAbsoluteMcpFilePath(sourcePath)) throw new Error('Provide an absolute local file path to import.')
   const category = inferMcpAssetCategory(sourcePath, payload.category || payload.type || payload.assetType)
 
@@ -7494,7 +7494,7 @@ async function handleImportAssetFromPath(payload = {}) {
   return {
     success: true,
     action: 'import_asset_from_path',
-    message: 'Imported local file into the active Velorn project.',
+    message: 'Imported local file into the active Vidwright project.',
     sourcePath,
     category,
     folderId,

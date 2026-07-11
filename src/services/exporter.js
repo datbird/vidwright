@@ -1194,7 +1194,7 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   // <video> seeks dominate export time; qualifying clips route through a
   // per-clip sequential decoder instead, falling back to the element path
   // per clip on any doubt. Kill switch: localStorage
-  // 'comfystudio-export-webcodecs' = '0'.
+  // 'vidwright-export-webcodecs' = '0'.
   const webCodecsEnabled = isWebCodecsExportEnabled()
   const FRAME_CURSOR_PREFETCH_SEC = 3
   // Per-phase wall-clock accumulators, surfaced in the completion payload so
@@ -1322,12 +1322,12 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   // masks, GLSL/managed effects, velocity blur, text raster) still render
   // through the 2D helpers and composite as GPU textures. Only engages on
   // the frame-pipe path (the PNG fallback keeps the 2D compositor). Kill
-  // switch: localStorage 'comfystudio-export-gpu' = '0'.
+  // switch: localStorage 'vidwright-export-gpu' = '0'.
   let gpu = null
   if (framePipeSessionId && isGpuExportEnabled()) {
     gpu = createGpuCompositor({ width, height, transparent: !!transparent })
     if (gpu) {
-      console.log('[Export] GPU compositor active (WebGL2). Set localStorage comfystudio-export-gpu=0 to use the 2D compositor.')
+      console.log('[Export] GPU compositor active (WebGL2). Set localStorage vidwright-export-gpu=0 to use the 2D compositor.')
     } else {
       console.warn('[Export] WebGL2 unavailable; using the 2D compositor.')
     }
@@ -1505,7 +1505,7 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
     const transitionInfo = soloClipSet ? null : timelineState.getTransitionAtTime(time)
 
     if (gpu?.isContextLost()) {
-      throw new Error('GPU compositor context lost mid-export. Re-run the export (set localStorage comfystudio-export-gpu=0 to force the 2D compositor).')
+      throw new Error('GPU compositor context lost mid-export. Re-run the export (set localStorage vidwright-export-gpu=0 to force the 2D compositor).')
     }
     if (gpu) {
       gpu.beginFrame()

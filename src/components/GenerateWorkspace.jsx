@@ -194,7 +194,7 @@ const EMPTY_CUSTOM_KEYFRAME_WORKFLOW = Object.freeze({
   updatedAt: 0,
 })
 
-const COMFYSTUDIO_BRIDGE_SOURCE = 'comfystudio-comfyui-bridge'
+const COMFYSTUDIO_BRIDGE_SOURCE = 'vidwright-comfyui-bridge'
 const EMPTY_COMFYSTUDIO_BRIDGE_STATUS = Object.freeze({
   state: 'unknown',
   installed: false,
@@ -270,7 +270,7 @@ function normalizeCustomKeyframeWorkflow(value) {
   }
 }
 
-function normalizeComfyStudioBridgeStatus(value) {
+function normalizeVidwrightBridgeStatus(value) {
   if (!value || typeof value !== 'object') return { ...EMPTY_COMFYSTUDIO_BRIDGE_STATUS }
   const state = String(value.state || (value.installed ? 'installed' : 'not_installed') || 'unknown').trim()
   return {
@@ -450,7 +450,7 @@ function buildGenerationErrorClipboardText({
   generationMode = '',
 } = {}) {
   const lines = [
-    'Velorn error report',
+    'Vidwright error report',
     `Timestamp: ${new Date().toISOString()}`,
   ]
 
@@ -1089,7 +1089,7 @@ function stripUgcDialogueQuotes(value = '') {
 // Global (cross-project) cache of voice audition clips, keyed by ElevenLabs
 // voice name -> base64 data URL. Lives in localStorage so it persists across
 // projects and restarts; generated once via the Voiceover step.
-const VOICE_PREVIEW_STORAGE_KEY = 'comfystudio-voice-previews-v1'
+const VOICE_PREVIEW_STORAGE_KEY = 'vidwright-voice-previews-v1'
 
 function readVoicePreviewCache() {
   if (typeof localStorage === 'undefined') return {}
@@ -2106,7 +2106,7 @@ function buildMusicVideoCoveragePlanPrompt(coveragePlan) {
     'B-roll, environmental, and detail coverage must tile as adjacent video clips: each shot has a Start at, and its Length should end exactly at the next shot Start at. The final shot must end at the full audio duration.',
     'B-roll shot starts must NOT be constrained to lyric/SRT offsets. Use lyric timings only as emotional/story landmarks, then create continuous b-roll coverage between and beyond those lyric moments.',
     'Do not write one long take for any pass. Break every pass into 2-8 second clips aligned to the song timing.',
-    'Use the exact Coverage type and Coverage label fields shown below so Velorn can group the shots later.',
+    'Use the exact Coverage type and Coverage label fields shown below so Vidwright can group the shots later.',
   ]
   plan.sections.forEach((section, index) => {
     lines.push(`  Coverage ${index + 1}: ${section.label}`)
@@ -3661,7 +3661,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
   ))
   const [customWorkflowBridgeTarget, setCustomWorkflowBridgeTarget] = useState('music-keyframe')
   const [yoloMusicCustomKeyframeBridgeStatus, setYoloMusicCustomKeyframeBridgeStatus] = useState(() => (
-    normalizeComfyStudioBridgeStatus()
+    normalizeVidwrightBridgeStatus()
   ))
   const [yoloMusicCustomKeyframeBridgeBusy, setYoloMusicCustomKeyframeBridgeBusy] = useState(false)
   const [yoloMusicVideoWorkflowId, setYoloMusicVideoWorkflowId] = useState(() => {
@@ -3826,8 +3826,8 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       setFormError(null)
       addComfyLog('status', `MCP prepared timeline frame for ${getWorkflowDisplayLabel(nextWorkflowId) || nextWorkflowId}. Review settings, then click Generate when ready.`)
     }
-    window.addEventListener('comfystudio-mcp-prepare-generation', handler)
-    return () => window.removeEventListener('comfystudio-mcp-prepare-generation', handler)
+    window.addEventListener('vidwright-mcp-prepare-generation', handler)
+    return () => window.removeEventListener('vidwright-mcp-prepare-generation', handler)
   }, [addComfyLog, frameForAI?.workflowId])
 
   // Restore selected asset from ID when assets are available
@@ -4760,7 +4760,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
   const handleImportYoloMusicAudio = useCallback(async () => {
     if (yoloMusicAudioImporting) return
     if (!currentProjectHandle) {
-      setFormError('Open or create a project first so Velorn can import the song file.')
+      setFormError('Open or create a project first so Vidwright can import the song file.')
       addComfyLog('error', 'Song audio import requires an open project folder.')
       return
     }
@@ -4827,7 +4827,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
   const handleImportYoloMusicCastImage = useCallback(async () => {
     if (yoloMusicCastImageImporting) return null
     if (!currentProjectHandle) {
-      setFormError('Open or create a project first so Velorn can import the reference image.')
+      setFormError('Open or create a project first so Vidwright can import the reference image.')
       addComfyLog('error', 'Cast reference import requires an open project folder.')
       return null
     }
@@ -4929,16 +4929,16 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           image: '',
         },
         _meta: {
-          title: 'VELORN_INPUT_IMAGE',
+          title: 'VIDWRIGHT_INPUT_IMAGE',
         },
       },
       '2': {
         class_type: 'PrimitiveStringMultiline',
         inputs: {
-          value: 'Velorn will inject the shot keyframe prompt here.',
+          value: 'Vidwright will inject the shot keyframe prompt here.',
         },
         _meta: {
-          title: 'VELORN_PROMPT',
+          title: 'VIDWRIGHT_PROMPT',
         },
       },
       '3': {
@@ -4947,7 +4947,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 0,
         },
         _meta: {
-          title: 'VELORN_SEED',
+          title: 'VIDWRIGHT_SEED',
         },
       },
       '4': {
@@ -4956,7 +4956,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 1280,
         },
         _meta: {
-          title: 'VELORN_WIDTH',
+          title: 'VIDWRIGHT_WIDTH',
         },
       },
       '5': {
@@ -4965,7 +4965,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 720,
         },
         _meta: {
-          title: 'VELORN_HEIGHT',
+          title: 'VIDWRIGHT_HEIGHT',
         },
       },
       '6': {
@@ -4978,7 +4978,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           crop: 'center',
         },
         _meta: {
-          title: 'Velorn Output Resize',
+          title: 'Vidwright Output Resize',
         },
       },
       '7': {
@@ -4988,13 +4988,13 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           filename_prefix: 'image/custom_keyframe_starter',
         },
         _meta: {
-          title: 'VELORN_OUTPUT_IMAGE',
+          title: 'VIDWRIGHT_OUTPUT_IMAGE',
         },
       },
     }
     const validation = validateCustomKeyframeWorkflow(starter)
     return {
-      name: 'Velorn custom keyframe starter',
+      name: 'Vidwright custom keyframe starter',
       workflow: starter,
       jsonText: JSON.stringify(starter, null, 2),
       validation,
@@ -5009,16 +5009,16 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           image: '',
         },
         _meta: {
-          title: 'VELORN_INPUT_IMAGE',
+          title: 'VIDWRIGHT_INPUT_IMAGE',
         },
       },
       '2': {
         class_type: 'PrimitiveStringMultiline',
         inputs: {
-          value: 'Velorn will inject the ad shot keyframe prompt here.',
+          value: 'Vidwright will inject the ad shot keyframe prompt here.',
         },
         _meta: {
-          title: 'VELORN_PROMPT',
+          title: 'VIDWRIGHT_PROMPT',
         },
       },
       '3': {
@@ -5027,7 +5027,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 0,
         },
         _meta: {
-          title: 'VELORN_SEED',
+          title: 'VIDWRIGHT_SEED',
         },
       },
       '4': {
@@ -5036,7 +5036,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 1280,
         },
         _meta: {
-          title: 'VELORN_WIDTH',
+          title: 'VIDWRIGHT_WIDTH',
         },
       },
       '5': {
@@ -5045,7 +5045,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 720,
         },
         _meta: {
-          title: 'VELORN_HEIGHT',
+          title: 'VIDWRIGHT_HEIGHT',
         },
       },
       '6': {
@@ -5058,7 +5058,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           crop: 'center',
         },
         _meta: {
-          title: 'Velorn Output Resize',
+          title: 'Vidwright Output Resize',
         },
       },
       '7': {
@@ -5068,13 +5068,13 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           filename_prefix: 'image/custom_ad_keyframe_starter',
         },
         _meta: {
-          title: 'VELORN_OUTPUT_IMAGE',
+          title: 'VIDWRIGHT_OUTPUT_IMAGE',
         },
       },
     }
     const validation = validateCustomKeyframeWorkflow(starter, { requireInputImage: false })
     return {
-      name: 'Velorn custom ad keyframe starter',
+      name: 'Vidwright custom ad keyframe starter',
       workflow: starter,
       jsonText: JSON.stringify(starter, null, 2),
       validation,
@@ -5089,16 +5089,16 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           image: '',
         },
         _meta: {
-          title: 'VELORN_INPUT_IMAGE',
+          title: 'VIDWRIGHT_INPUT_IMAGE',
         },
       },
       '2': {
         class_type: 'PrimitiveStringMultiline',
         inputs: {
-          value: 'Velorn will inject the shot video prompt here.',
+          value: 'Vidwright will inject the shot video prompt here.',
         },
         _meta: {
-          title: 'VELORN_PROMPT',
+          title: 'VIDWRIGHT_PROMPT',
         },
       },
       '3': {
@@ -5107,7 +5107,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 0,
         },
         _meta: {
-          title: 'VELORN_SEED',
+          title: 'VIDWRIGHT_SEED',
         },
       },
       '4': {
@@ -5116,7 +5116,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 1280,
         },
         _meta: {
-          title: 'VELORN_WIDTH',
+          title: 'VIDWRIGHT_WIDTH',
         },
       },
       '5': {
@@ -5125,7 +5125,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 720,
         },
         _meta: {
-          title: 'VELORN_HEIGHT',
+          title: 'VIDWRIGHT_HEIGHT',
         },
       },
       '6': {
@@ -5134,7 +5134,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 24,
         },
         _meta: {
-          title: 'VELORN_FPS',
+          title: 'VIDWRIGHT_FPS',
         },
       },
       '7': {
@@ -5143,7 +5143,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 5,
         },
         _meta: {
-          title: 'VELORN_DURATION',
+          title: 'VIDWRIGHT_DURATION',
         },
       },
       '8': {
@@ -5152,7 +5152,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           audio: '',
         },
         _meta: {
-          title: 'VELORN_AUDIO',
+          title: 'VIDWRIGHT_AUDIO',
         },
       },
       '9': {
@@ -5165,7 +5165,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           crop: 'center',
         },
         _meta: {
-          title: 'Velorn Output Resize',
+          title: 'Vidwright Output Resize',
         },
       },
       '10': {
@@ -5175,13 +5175,13 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           filename_prefix: 'video/custom_video_starter',
         },
         _meta: {
-          title: 'VELORN_OUTPUT_VIDEO',
+          title: 'VIDWRIGHT_OUTPUT_VIDEO',
         },
       },
     }
     const validation = validateCustomVideoWorkflow(starter)
     return {
-      name: 'Velorn custom video starter',
+      name: 'Vidwright custom video starter',
       workflow: starter,
       jsonText: JSON.stringify(starter, null, 2),
       validation,
@@ -5244,7 +5244,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           filename_prefix: 'image/custom_generate_starter',
         },
         _meta: {
-          title: 'VELORN_OUTPUT_IMAGE',
+          title: 'VIDWRIGHT_OUTPUT_IMAGE',
         },
       },
     }
@@ -5254,7 +5254,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       validateOptionalEndpoints: false,
     })
     return {
-      name: 'Velorn custom image starter',
+      name: 'Vidwright custom image starter',
       workflow: starter,
       jsonText: JSON.stringify(starter, null, 2),
       validation,
@@ -5269,16 +5269,16 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           image: '',
         },
         _meta: {
-          title: 'VELORN_INPUT_IMAGE',
+          title: 'VIDWRIGHT_INPUT_IMAGE',
         },
       },
       '2': {
         class_type: 'PrimitiveStringMultiline',
         inputs: {
-          value: 'Velorn will inject the video prompt here.',
+          value: 'Vidwright will inject the video prompt here.',
         },
         _meta: {
-          title: 'VELORN_PROMPT',
+          title: 'VIDWRIGHT_PROMPT',
         },
       },
       '3': {
@@ -5287,7 +5287,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 0,
         },
         _meta: {
-          title: 'VELORN_SEED',
+          title: 'VIDWRIGHT_SEED',
         },
       },
       '4': {
@@ -5296,7 +5296,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 1280,
         },
         _meta: {
-          title: 'VELORN_WIDTH',
+          title: 'VIDWRIGHT_WIDTH',
         },
       },
       '5': {
@@ -5305,7 +5305,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 720,
         },
         _meta: {
-          title: 'VELORN_HEIGHT',
+          title: 'VIDWRIGHT_HEIGHT',
         },
       },
       '6': {
@@ -5314,7 +5314,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 24,
         },
         _meta: {
-          title: 'VELORN_FPS',
+          title: 'VIDWRIGHT_FPS',
         },
       },
       '7': {
@@ -5323,7 +5323,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           value: 5,
         },
         _meta: {
-          title: 'VELORN_DURATION',
+          title: 'VIDWRIGHT_DURATION',
         },
       },
       '8': {
@@ -5332,7 +5332,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           audio: '',
         },
         _meta: {
-          title: 'VELORN_AUDIO',
+          title: 'VIDWRIGHT_AUDIO',
         },
       },
       '9': {
@@ -5345,7 +5345,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           crop: 'center',
         },
         _meta: {
-          title: 'Velorn Output Resize',
+          title: 'Vidwright Output Resize',
         },
       },
       '10': {
@@ -5355,13 +5355,13 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           filename_prefix: 'video/custom_generate_starter',
         },
         _meta: {
-          title: 'VELORN_OUTPUT_VIDEO',
+          title: 'VIDWRIGHT_OUTPUT_VIDEO',
         },
       },
     }
     const validation = validateCustomVideoWorkflow(starter, { requireInputImage: false })
     return {
-      name: 'Velorn custom video starter',
+      name: 'Vidwright custom video starter',
       workflow: starter,
       jsonText: JSON.stringify(starter, null, 2),
       validation,
@@ -5828,10 +5828,10 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
   const handleCheckYoloMusicCustomKeyframeBridge = useCallback(async ({ silent = false } = {}) => {
     const bridge = typeof window !== 'undefined' ? window.electronAPI?.comfyBridge : null
     if (!bridge?.getStatus) {
-      const unavailable = normalizeComfyStudioBridgeStatus({
+      const unavailable = normalizeVidwrightBridgeStatus({
         state: 'unavailable',
         installed: false,
-        message: 'Velorn Bridge is only available in the desktop app.',
+        message: 'Vidwright Bridge is only available in the desktop app.',
       })
       setYoloMusicCustomKeyframeBridgeStatus(unavailable)
       if (!silent) addComfyLog('warning', unavailable.message)
@@ -5841,17 +5841,17 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
     setYoloMusicCustomKeyframeBridgeBusy(true)
     try {
       const result = await bridge.getStatus()
-      const next = normalizeComfyStudioBridgeStatus(result)
+      const next = normalizeVidwrightBridgeStatus(result)
       setYoloMusicCustomKeyframeBridgeStatus(next)
       if (!silent) {
         addComfyLog(next.installed ? 'ok' : 'status', next.message)
       }
       return next
     } catch (error) {
-      const next = normalizeComfyStudioBridgeStatus({
+      const next = normalizeVidwrightBridgeStatus({
         state: 'unavailable',
         installed: false,
-        error: error?.message || 'Could not check the Velorn Bridge.',
+        error: error?.message || 'Could not check the Vidwright Bridge.',
       })
       setYoloMusicCustomKeyframeBridgeStatus(next)
       if (!silent) addComfyLog('error', next.message)
@@ -5940,7 +5940,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
         addComfyLog(validation.ok ? 'ok' : 'warning', validation.ok
           ? `Received custom ${targetLabel} workflow from ComfyUI: ${name}`
           : `Received workflow from ComfyUI but it needs attention: ${validation.message}`)
-        window.dispatchEvent(new CustomEvent('comfystudio-open-generate-tab', {
+        window.dispatchEvent(new CustomEvent('vidwright-open-generate-tab', {
           detail: { source: COMFYSTUDIO_BRIDGE_SOURCE },
         }))
       } catch (error) {
@@ -7644,10 +7644,10 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
   const handleInstallYoloMusicCustomKeyframeBridge = useCallback(async () => {
     const bridge = typeof window !== 'undefined' ? window.electronAPI?.comfyBridge : null
     if (!bridge?.install) {
-      const unavailable = normalizeComfyStudioBridgeStatus({
+      const unavailable = normalizeVidwrightBridgeStatus({
         state: 'unavailable',
         installed: false,
-        message: 'Velorn Bridge is only available in the desktop app.',
+        message: 'Vidwright Bridge is only available in the desktop app.',
       })
       setYoloMusicCustomKeyframeBridgeStatus(unavailable)
       addComfyLog('warning', unavailable.message)
@@ -7657,11 +7657,11 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
     setYoloMusicCustomKeyframeBridgeBusy(true)
     try {
       const result = await bridge.install()
-      const status = normalizeComfyStudioBridgeStatus(result)
+      const status = normalizeVidwrightBridgeStatus(result)
       setYoloMusicCustomKeyframeBridgeStatus(status)
 
       if (!result?.success) {
-        addComfyLog('error', status.message || status.error || 'Could not install the Velorn Bridge.')
+        addComfyLog('error', status.message || status.error || 'Could not install the Vidwright Bridge.')
         return status
       }
 
@@ -7670,7 +7670,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
 
       const restartNow = await requestConfirm({
         title: 'Restart ComfyUI now?',
-        message: 'The Velorn Bridge is installed. Restart ComfyUI now to load the Send to Velorn button.\n\nIf this ComfyUI session was started outside Velorn, restart it manually and then re-check the bridge.',
+        message: 'The Vidwright Bridge is installed. Restart ComfyUI now to load the Send to Vidwright button.\n\nIf this ComfyUI session was started outside Vidwright, restart it manually and then re-check the bridge.',
         confirmLabel: 'Restart ComfyUI',
         cancelLabel: 'Later',
         tone: 'primary',
@@ -7710,10 +7710,10 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       await handleCheckYoloMusicCustomKeyframeBridge({ silent: true })
       return status
     } catch (error) {
-      const next = normalizeComfyStudioBridgeStatus({
+      const next = normalizeVidwrightBridgeStatus({
         state: 'unavailable',
         installed: false,
-        error: error?.message || 'Could not install the Velorn Bridge.',
+        error: error?.message || 'Could not install the Vidwright Bridge.',
       })
       setYoloMusicCustomKeyframeBridgeStatus(next)
       addComfyLog('error', next.message)
@@ -11892,8 +11892,8 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       })
     }
 
-    window.addEventListener('comfystudio-mcp-queue-prepared-generation', handler)
-    return () => window.removeEventListener('comfystudio-mcp-queue-prepared-generation', handler)
+    window.addEventListener('vidwright-mcp-queue-prepared-generation', handler)
+    return () => window.removeEventListener('vidwright-mcp-queue-prepared-generation', handler)
   }, [
     addComfyLog,
     allowQueueWhileWaiting,
@@ -12111,8 +12111,8 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       })
     }
 
-    window.addEventListener('comfystudio-mcp-queue-timeline-generation-batch', handler)
-    return () => window.removeEventListener('comfystudio-mcp-queue-timeline-generation-batch', handler)
+    window.addEventListener('vidwright-mcp-queue-timeline-generation-batch', handler)
+    return () => window.removeEventListener('vidwright-mcp-queue-timeline-generation-batch', handler)
   }, [
     addComfyLog,
     allowQueueWhileWaiting,
@@ -12521,8 +12521,8 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       })
     }
 
-    window.addEventListener('comfystudio-mcp-queue-template-generation', handler)
-    return () => window.removeEventListener('comfystudio-mcp-queue-template-generation', handler)
+    window.addEventListener('vidwright-mcp-queue-template-generation', handler)
+    return () => window.removeEventListener('vidwright-mcp-queue-template-generation', handler)
   }, [
     addComfyLog,
     allowQueueWhileWaiting,
@@ -12660,7 +12660,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           const manifest = getWorkflowManifestByWorkflowId(id)
           const label = getWorkflowDisplayLabel(id) || id
           if (!manifest) {
-            respond({ success: false, error: `Unknown Velorn workflow: ${id}`, status })
+            respond({ success: false, error: `Unknown Vidwright workflow: ${id}`, status })
             return
           }
           if (manifest.runnable === false) {
@@ -12828,8 +12828,8 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
       })
     }
 
-    window.addEventListener('comfystudio-mcp-queue-prompt-generation-batch', handler)
-    return () => window.removeEventListener('comfystudio-mcp-queue-prompt-generation-batch', handler)
+    window.addEventListener('vidwright-mcp-queue-prompt-generation-batch', handler)
+    return () => window.removeEventListener('vidwright-mcp-queue-prompt-generation-batch', handler)
   }, [
     addComfyLog,
     allowQueueWhileWaiting,
@@ -13840,7 +13840,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
           ? 'image'
           : importedJobEntry.manifest?.outputType === 'audio'
             ? 'audio'
-          : 'video'}/velorn_${outputToken}`
+          : 'video'}/vidwright_${outputToken}`
       ) : (
         isSingleVideoWorkflowId(job.workflowId) ||
         job.workflowId === 'ltx23-t2v' ||
@@ -13869,10 +13869,10 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
             job.workflowId === CUSTOM_AD_KEYFRAME_WORKFLOW_ID ||
             job.workflowId === CUSTOM_MUSIC_KEYFRAME_WORKFLOW_ID
           )
-            ? `image/velorn_${outputToken}`
+            ? `image/vidwright_${outputToken}`
             : (
               job.workflowId === 'sonilo-v2m' || job.workflowId === ELEVENLABS_TTS_WORKFLOW_ID
-              ? `audio/velorn_${outputToken}`
+              ? `audio/vidwright_${outputToken}`
                 : ''
             )
       )
@@ -14161,7 +14161,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
             frames: Math.round(job.duration * job.fps) + 1,
             fps: job.fps,
             seed: job.seed,
-            filenamePrefix: outputPrefix || 'video/Velorn_wan',
+            filenamePrefix: outputPrefix || 'video/Vidwright_wan',
             qualityPreset: job.wanQualityPreset || 'balanced',
           })
           break
@@ -14352,7 +14352,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
             width: job.resolution?.width,
             height: job.resolution?.height,
             referenceImages: referenceFilenames,
-            filenamePrefix: outputPrefix || 'image/Velorn_edit',
+            filenamePrefix: outputPrefix || 'image/Vidwright_edit',
           })
           break
         case CUSTOM_MUSIC_KEYFRAME_WORKFLOW_ID:
@@ -14837,7 +14837,7 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
             {!launcherIsBooting && !launcherWaitingForExternal && launcherCanAutoStart && (
               <>
                 <span className="font-semibold">ComfyUI is offline.</span>{' '}
-                <span className="text-sky-200/85">Hit Start (or just queue a job) and Velorn will boot it for you.</span>
+                <span className="text-sky-200/85">Hit Start (or just queue a job) and Vidwright will boot it for you.</span>
               </>
             )}
           </div>
@@ -15717,8 +15717,8 @@ function GenerateWorkspace({ onOpenWorkflowSetup = null }) {
                               <div className="text-[10px] leading-5 text-sf-text-secondary">
                                 <div className="font-semibold text-sf-text-primary">Lyrics source</div>
                                 {yoloMusicAlignProvidedLyrics
-                                  ? 'Paste plain lyrics below. Velorn listens to the selected audio for timing, then writes your lyrics as SRT.'
-                                  : 'Velorn listens to the selected audio and writes timed SRT output.'}
+                                  ? 'Paste plain lyrics below. Vidwright listens to the selected audio for timing, then writes your lyrics as SRT.'
+                                  : 'Vidwright listens to the selected audio and writes timed SRT output.'}
                               </div>
                               <div className="inline-flex rounded-lg border border-sf-dark-600 bg-sf-dark-950 p-1">
                                 <button

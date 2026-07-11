@@ -1,4 +1,4 @@
-// Velorn feedback relay — Cloudflare Worker.
+// Vidwright feedback relay — Cloudflare Worker.
 //
 // Receives feedback POSTs from the app and forwards them to a private Discord
 // channel via webhook. The webhook URL lives ONLY here (secret binding), never

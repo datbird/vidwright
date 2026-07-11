@@ -6,7 +6,7 @@ import CustomWorkflowLibraryPicker from './CustomWorkflowLibraryPicker'
  * Shared "custom workflow" slot card for Director creators (keyframe + video
  * slots). Primary path: pick a saved My Workflows graph — the picker is the
  * card's main content until a workflow is loaded, then the card collapses to
- * a one-line summary. Import JSON and the Velorn bridge live under Advanced;
+ * a one-line summary. Import JSON and the Vidwright bridge live under Advanced;
  * the bridge section shrinks to a note once installed.
  */
 export default function CustomWorkflowSlotCard({
@@ -37,7 +37,7 @@ export default function CustomWorkflowSlotCard({
   const bridgeMessage = String(
     bridgeStatus?.message
     || bridgeStatus?.error
-    || 'Optional bridge lets ComfyUI send the current graph back to Velorn.'
+    || 'Optional bridge lets ComfyUI send the current graph back to Vidwright.'
   ).trim()
   const bridgeBadge = bridgeState === 'unavailable'
     ? { label: 'Needs setup', className: 'border-amber-500/40 bg-amber-500/10 text-amber-200' }
@@ -131,7 +131,7 @@ export default function CustomWorkflowSlotCard({
           >
             Open the starter in ComfyUI
           </button>
-          {' '}— it has every VELORN node title already set. Make it yours, then save it to My Workflows.
+          {' '}— it has every VIDWRIGHT node title already set. Make it yours, then save it to My Workflows.
         </div>
       )}
 
@@ -161,7 +161,7 @@ export default function CustomWorkflowSlotCard({
             {bridgeInstalled ? (
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-[10px] text-emerald-300">
-                  Velorn Bridge installed — Send to Velorn is available inside ComfyUI.
+                  Vidwright Bridge installed — Send to Vidwright is available inside ComfyUI.
                 </span>
                 <span className="flex flex-wrap items-center gap-1.5">
                   <button
@@ -189,7 +189,7 @@ export default function CustomWorkflowSlotCard({
             ) : (
               <div className="rounded border border-sf-dark-700 bg-sf-dark-950/40 p-2.5">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-sf-text-muted">Velorn bridge</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-sf-text-muted">Vidwright bridge</span>
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] ${bridgeBadge.className}`}>
                     {bridgeBadge.label}
                   </span>
@@ -208,7 +208,7 @@ export default function CustomWorkflowSlotCard({
                     onClick={onInstallBridge}
                     disabled={!canInstallBridge || bridgeBusy}
                     className="inline-flex items-center justify-center gap-1.5 rounded border border-sf-accent/50 bg-sf-accent/10 px-2 py-1.5 text-[10px] font-semibold text-sf-accent transition-colors hover:bg-sf-accent/20 disabled:cursor-not-allowed disabled:border-sf-dark-600 disabled:bg-sf-dark-800 disabled:text-sf-text-muted"
-                    title={bridgeState === 'unavailable' ? 'Choose a ComfyUI folder or configure the launcher first.' : 'Install the bundled Velorn Bridge into ComfyUI custom_nodes.'}
+                    title={bridgeState === 'unavailable' ? 'Choose a ComfyUI folder or configure the launcher first.' : 'Install the bundled Vidwright Bridge into ComfyUI custom_nodes.'}
                   >
                     {bridgeBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle2 className="h-3 w-3" />}
                     Install Bridge

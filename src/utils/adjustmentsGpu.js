@@ -246,7 +246,7 @@ export function applyAdjustmentSettingsToCanvasGpu(sourceCanvas, targetCtx, widt
   if (!sourceCanvas || !targetCtx || !width || !height) return false
   // Kill switch, same pattern as the export flags: '0' forces the CPU loop.
   try {
-    if (window.localStorage.getItem('comfystudio-preview-gpu-grade') === '0') return false
+    if (window.localStorage.getItem('vidwright-preview-gpu-grade') === '0') return false
   } catch (_) { /* ignore */ }
   const key = `${width}x${height}`
   try {

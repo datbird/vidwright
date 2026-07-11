@@ -103,7 +103,7 @@ export const createProjectFolder = async (baseDir, projectName) => {
   return projectDir
 }
 
-const PROJECT_FILENAME = 'project.comfystudio'
+const PROJECT_FILENAME = 'project.vidwright'
 const PROJECT_FILENAME_LEGACY = 'project.storyflow'
 const PROJECT_AUTOSAVE_DIRNAME = 'autosave'
 const MAX_PROJECT_AUTOSAVE_SNAPSHOTS = 10
@@ -162,7 +162,7 @@ const createProjectSnapshotFilename = (timestamp = new Date()) => {
     padNumber(date.getSeconds()),
     '-',
     padNumber(date.getMilliseconds(), 3),
-    '.comfystudio',
+    '.vidwright',
   ].join('')
 }
 
@@ -192,7 +192,7 @@ const writeProjectSnapshotElectron = async (projectDir, projectJson, timestamp) 
   }
 
   const snapshots = sortSnapshotsNewestFirst(
-    listing.items.filter((item) => item.isFile && item.name.endsWith('.comfystudio'))
+    listing.items.filter((item) => item.isFile && item.name.endsWith('.vidwright'))
   )
 
   await Promise.all(
@@ -212,7 +212,7 @@ const writeProjectSnapshotWeb = async (projectDir, projectJson, timestamp) => {
 
   const snapshots = []
   for await (const [name, handle] of autosaveDir.entries()) {
-    if (handle.kind !== 'file' || !name.endsWith('.comfystudio')) continue
+    if (handle.kind !== 'file' || !name.endsWith('.vidwright')) continue
     const file = await handle.getFile()
     snapshots.push({
       name,
@@ -234,7 +234,7 @@ const writeProjectSnapshot = async (projectDir, projectJson, timestamp) => {
 }
 
 /**
- * Save project data to .comfystudio file
+ * Save project data to .vidwright file
  * @param {string|FileSystemDirectoryHandle} projectDir - The project directory
  * @param {object} projectData - The project data to save
  */
@@ -350,7 +350,7 @@ const parseProjectJson = (rawText, sourceLabel) => {
 }
 
 /**
- * Load project data from .comfystudio file (or legacy .storyflow)
+ * Load project data from .vidwright file (or legacy .storyflow)
  * @param {string|FileSystemDirectoryHandle} projectDir - The project directory
  * @returns {Promise<object|null>} - The project data or null if not found
  */
@@ -376,7 +376,7 @@ export const loadProject = async (projectDir) => {
     return projectData
   }
   
-  // Web fallback: try comfystudio first, then legacy storyflow
+  // Web fallback: try vidwright first, then legacy storyflow
   const tryLoad = async (filename) => {
     const fileHandle = await projectDir.getFileHandle(filename)
     const file = await fileHandle.getFile()
@@ -427,7 +427,7 @@ export const loadLatestProjectAutosave = async (projectDir) => {
     }
 
     const latestSnapshot = sortSnapshotsNewestFirst(
-      listing.items.filter((item) => item.isFile && item.name.endsWith('.comfystudio'))
+      listing.items.filter((item) => item.isFile && item.name.endsWith('.vidwright'))
     )[0]
 
     if (!latestSnapshot) {
@@ -452,7 +452,7 @@ export const loadLatestProjectAutosave = async (projectDir) => {
     const snapshots = []
 
     for await (const [name, handle] of autosaveDir.entries()) {
-      if (handle.kind !== 'file' || !name.endsWith('.comfystudio')) continue
+      if (handle.kind !== 'file' || !name.endsWith('.vidwright')) continue
       const file = await handle.getFile()
       snapshots.push({
         name,
@@ -481,7 +481,7 @@ export const loadLatestProjectAutosave = async (projectDir) => {
 }
 
 /**
- * Check if a directory is a valid Velorn project
+ * Check if a directory is a valid Vidwright project
  * @param {string|FileSystemDirectoryHandle} dir - Directory to check
  * @returns {Promise<boolean>}
  */
@@ -1135,7 +1135,7 @@ export const deleteProjectFile = async (projectDir, relativePath) => {
 // Directory Handle Storage (Web only - not needed in Electron)
 // ============================================
 
-const DB_NAME = 'comfystudio-handles'
+const DB_NAME = 'vidwright-handles'
 const DB_VERSION = 1
 const STORE_NAME = 'directory-handles'
 

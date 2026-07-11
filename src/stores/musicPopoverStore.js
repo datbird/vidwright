@@ -34,7 +34,7 @@ export const useMusicPopoverStore = create(
       })),
     }),
     {
-      name: 'velorn-music-popover',
+      name: 'vidwright-music-popover',
       partialize: (state) => ({
         tags: state.tags,
         instrumental: state.instrumental,

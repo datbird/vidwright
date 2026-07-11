@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ComfyStudio - Ad Creation Easy Mode Mockup</title>
+  <title>Vidwright - Ad Creation Easy Mode Mockup</title>
   <style>
     :root {
       --bg-950: #0b0d11;
@@ -1168,7 +1168,7 @@
       <div class="brand">
         <div class="spark">CS</div>
         <div>
-          <h1>ComfyStudio Generate</h1>
+          <h1>Vidwright Generate</h1>
           <div class="crumb">Create / Ad Creation Easy Mode prototype</div>
         </div>
       </div>
@@ -1230,7 +1230,7 @@
             <h3>Product Ad</h3>
             <p>The current full-control ad creator with setup, script, keyframes, and video passes.</p>
             <div class="card-row">
-              <span class="mini-pill">ComfyStudio</span>
+              <span class="mini-pill">Vidwright</span>
               <span>Full controls</span>
             </div>
           </div>
@@ -1247,7 +1247,7 @@
             <h3>Music Video</h3>
             <p>Guided music video planning with lyrics, shots, keyframes, and rendered videos.</p>
             <div class="card-row">
-              <span class="mini-pill">ComfyStudio</span>
+              <span class="mini-pill">Vidwright</span>
               <span>Lyrics to shots</span>
             </div>
           </div>
@@ -1266,7 +1266,7 @@
       <main class="main-card">
         <section class="panel active" data-panel="brief">
           <div class="panel-head">
-            <div class="assistant-line">ComfyStudio asks</div>
+            <div class="assistant-line">Vidwright asks</div>
             <h2>Let's start with the product.</h2>
             <p>Answer what you know. Anything you leave blank can become a sensible default when the plan is generated.</p>
           </div>
@@ -1332,7 +1332,7 @@
 
         <section class="panel" data-panel="direction">
           <div class="panel-head">
-            <div class="assistant-line">ComfyStudio asks</div>
+            <div class="assistant-line">Vidwright asks</div>
             <h2>What kind of ad should this become?</h2>
             <p>Pick the shape of the spot. These choices map to the same format, platform, quality, and video model settings in Advanced mode.</p>
           </div>
@@ -1391,7 +1391,7 @@
 
         <section class="panel" data-panel="references">
           <div class="panel-head">
-            <div class="assistant-line">ComfyStudio asks</div>
+            <div class="assistant-line">Vidwright asks</div>
             <h2>Do you have product or talent references?</h2>
             <p>These are optional, but they help a lot. A multi-angle character sheet for talent and a multi-angle product sheet give the workflows stronger visual anchors.</p>
           </div>
@@ -1544,7 +1544,7 @@
             <div class="script-list" id="scriptList"></div>
             <div class="llm-helper">
               <label for="llmPrompt">Optional: use your own LLM</label>
-              <div class="hint">No API key or setup required in ComfyStudio. Copy this prompt into ChatGPT, Claude, Gemini, etc., then paste the result into the editable script box below.</div>
+              <div class="hint">No API key or setup required in Vidwright. Copy this prompt into ChatGPT, Claude, Gemini, etc., then paste the result into the editable script box below.</div>
               <textarea id="llmPrompt" readonly></textarea>
               <div class="inline-actions">
                 <button class="btn" id="copyLlmPromptButton" type="button">Copy LLM prompt</button>
@@ -2009,7 +2009,7 @@
     function buildLlmPrompt(shots) {
       const data = collectData();
       return [
-        "Write a ComfyStudio Director Mode ad script using this exact structure.",
+        "Write a Vidwright Director Mode ad script using this exact structure.",
         "",
         `Brand: ${data.brand}`,
         `Product: ${data.product}`,

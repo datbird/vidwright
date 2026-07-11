@@ -1,0 +1,18 @@
+Vidwright
+=========
+
+Vidwright is a fork of Velorn (https://github.com/VelornLabs/velorn),
+copyright (C) Velorn contributors.
+
+Vidwright and all modifications made to the original work are likewise
+licensed under the GNU General Public License, version 3.0 only (GPL-3.0-only),
+the same license as the upstream project. See the LICENSE file for the full
+license text.
+
+This is an independent fork. It is not affiliated with, sponsored by, or
+endorsed by the Velorn project or its maintainers. The names "Velorn" and
+"Vidwright" and their respective logos are trademarks of their respective
+owners; this attribution notice does not grant any trademark rights.
+
+Original project:  Velorn — https://github.com/VelornLabs/velorn
+This fork:         Vidwright — https://github.com/datbird/vidwright

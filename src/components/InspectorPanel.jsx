@@ -70,9 +70,9 @@ import {
 } from '../utils/layerCompositing'
 import { DEFAULT_LINE_THICKNESS, DEFAULT_POLYGON_SIDES, DEFAULT_SHAPE_PROPERTIES, SHAPE_FILL_TYPES, SHAPE_TYPES, normalizeShapeProperties } from '../utils/shapes'
 
-const TRANSITION_DEFAULT_DURATION_KEY = 'comfystudio-transition-default-duration-frames'
-const INSPECTOR_EXPANDED_SECTIONS_KEY = 'comfystudio-inspector-expanded-sections-v1'
-const INSPECTOR_EXPANDED_ADJUSTMENT_GROUPS_KEY = 'comfystudio-inspector-expanded-adjustment-groups-v1'
+const TRANSITION_DEFAULT_DURATION_KEY = 'vidwright-transition-default-duration-frames'
+const INSPECTOR_EXPANDED_SECTIONS_KEY = 'vidwright-inspector-expanded-sections-v1'
+const INSPECTOR_EXPANDED_ADJUSTMENT_GROUPS_KEY = 'vidwright-inspector-expanded-adjustment-groups-v1'
 const DEFAULT_INSPECTOR_EXPANDED_SECTIONS = ['clipInfo', 'transform', 'compositing', 'crop', 'timing', 'effects', 'text', 'style', 'shape', 'animation', 'adjustments', 'commit']
 const DEFAULT_EXPANDED_ADJUSTMENT_GROUPS = ['global']
 const INSPECTOR_SETTINGS_SCOPE = {
@@ -5772,7 +5772,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     const handleSetDefaultDuration = () => {
       try {
         localStorage.setItem(TRANSITION_DEFAULT_DURATION_KEY, String(durationFrames))
-        window.dispatchEvent(new CustomEvent('comfystudio-transition-default-duration-changed', { detail: durationFrames }))
+        window.dispatchEvent(new CustomEvent('vidwright-transition-default-duration-changed', { detail: durationFrames }))
       } catch (_) {}
     }
 

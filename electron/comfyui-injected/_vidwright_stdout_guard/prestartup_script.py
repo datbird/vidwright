@@ -1,11 +1,11 @@
-# Velorn runtime guard (prestartup hook).
+# Vidwright runtime guard (prestartup hook).
 #
 # This single file installs narrow, non-invasive patches to the Python runtime
 # that ComfyUI is launched from. All exist to paper over Windows-specific
 # rough edges that would otherwise surface as visible artifacts (crashes,
 # flashing console windows) to end users.
 #
-# Historical note: the directory is still called `_comfystudio_stdout_guard`
+# Historical note: the directory is still called `_vidwright_stdout_guard`
 # because an earlier pass only did the stdout patch. We kept the name to
 # avoid leaving orphaned directories in users' custom_nodes/ folders. The
 # patches are now:
@@ -48,7 +48,7 @@
 # a new object; we only swap a bound method on the same TextIOWrapper
 # instance, which wandb's wrapping handles correctly.
 #
-# Removal: delete this directory. Velorn will recreate it on the next
+# Removal: delete this directory. Vidwright will recreate it on the next
 # launch unless you disable the guard in the launcher settings.
 
 import io
@@ -238,7 +238,7 @@ if sys.platform == "win32":
 # ---------------------------------------------------------------------------
 
 try:
-    _banner = ("[Velorn runtime guard] installed: " + ", ".join(_patch_notes) + "\n").encode("ascii", "replace")
+    _banner = ("[Vidwright runtime guard] installed: " + ", ".join(_patch_notes) + "\n").encode("ascii", "replace")
     sys.__stdout__.buffer.write(_banner)
     sys.__stdout__.buffer.flush()
 except Exception:

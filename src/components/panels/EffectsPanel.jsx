@@ -26,7 +26,7 @@ const EFFECT_PANEL_ICONS = {
   letterbox: RectangleHorizontal,
 }
 
-const TRANSITION_DEFAULT_DURATION_KEY = 'comfystudio-transition-default-duration-frames'
+const TRANSITION_DEFAULT_DURATION_KEY = 'vidwright-transition-default-duration-frames'
 
 function EffectsPanel() {
   const {
@@ -91,8 +91,8 @@ function EffectsPanel() {
         setDurationFrames(Math.round(next))
       }
     }
-    window.addEventListener('comfystudio-transition-default-duration-changed', handler)
-    return () => window.removeEventListener('comfystudio-transition-default-duration-changed', handler)
+    window.addEventListener('vidwright-transition-default-duration-changed', handler)
+    return () => window.removeEventListener('vidwright-transition-default-duration-changed', handler)
   }, [])
   
   const getSelectedPair = () => {
@@ -209,13 +209,13 @@ function EffectsPanel() {
   
   const handleDragStart = (e, transitionType) => {
     const payload = { type: transitionType, duration: durationSeconds }
-    e.dataTransfer.setData('application/x-comfystudio-transition', JSON.stringify(payload))
+    e.dataTransfer.setData('application/x-vidwright-transition', JSON.stringify(payload))
     e.dataTransfer.effectAllowed = 'copy'
   }
 
   const handleEffectDragStart = (e, effectTypeId, presetId = null) => {
     const payload = { effectType: effectTypeId, presetId }
-    e.dataTransfer.setData('application/x-comfystudio-effect', JSON.stringify(payload))
+    e.dataTransfer.setData('application/x-vidwright-effect', JSON.stringify(payload))
     e.dataTransfer.effectAllowed = 'copy'
   }
 

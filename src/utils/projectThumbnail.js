@@ -2,7 +2,7 @@
  * Project thumbnail capture.
  *
  * On every save (manual or autosave), we render a composite frame of the
- * current timeline at the playhead and drop it next to project.comfystudio
+ * current timeline at the playhead and drop it next to project.vidwright
  * as `project.thumbnail.webp`. The welcome screen can then show real
  * content for each recent project instead of an empty placeholder — same
  * pattern DaVinci Resolve uses for its project browser.
@@ -278,7 +278,7 @@ export async function resolveThumbnailUrl(projectHandleOrPath, thumbnailPointer)
   const pointer = String(thumbnailPointer || '').trim()
   if (!pointer) return null
 
-  // Electron: use the comfystudio:// file protocol so the <img> can stream
+  // Electron: use the vidwright:// file protocol so the <img> can stream
   // from disk without base64 overhead.
   if (typeof projectHandleOrPath === 'string' && typeof window !== 'undefined' && window.electronAPI) {
     try {

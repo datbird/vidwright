@@ -13,7 +13,7 @@ import {
 } from '../config/workflowRegistry'
 import { isElectron } from '../services/fileSystem'
 
-const STORAGE_KEY = 'comfystudio-workflows'
+const STORAGE_KEY = 'vidwright-workflows'
 
 // Built-in workflow IDs are always installed
 const BUILTIN_IDS = new Set(BUILTIN_WORKFLOWS.map(w => w.id))

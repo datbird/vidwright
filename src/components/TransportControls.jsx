@@ -7,7 +7,7 @@ import TimelineSwitcher from './TimelineSwitcher'
 import { isTextEditingElement } from '../utils/keyboardFocus'
 import { formatTimecode, getSafeTimelineFps, stepTimeByFrames } from '../utils/timelineFrames'
 
-const SPACE_MODIFIER_USED_EVENT = 'comfystudio-space-modifier-used'
+const SPACE_MODIFIER_USED_EVENT = 'vidwright-space-modifier-used'
 
 // Playback mode options
 const PLAYBACK_MODES = [

@@ -217,13 +217,13 @@ function AssetsPanel({ isActive = true }) {
     })
   }
 
-  const ASSET_DRAG_TYPE = 'application/x-comfystudio-asset-ids'
-  const SEQUENCE_DRAG_TYPE = 'application/x-comfystudio-sequence-ids'
+  const ASSET_DRAG_TYPE = 'application/x-vidwright-asset-ids'
+  const SEQUENCE_DRAG_TYPE = 'application/x-vidwright-sequence-ids'
 
   const notifyAssetDragStart = (assetId, assetIds) => {
     if (typeof window === 'undefined') return
     try {
-      window.dispatchEvent(new CustomEvent('comfystudio-assets-drag-start', {
+      window.dispatchEvent(new CustomEvent('vidwright-assets-drag-start', {
         detail: { assetId, assetIds }
       }))
     } catch (_) {}
@@ -232,7 +232,7 @@ function AssetsPanel({ isActive = true }) {
   const notifyAssetDragEnd = () => {
     if (typeof window === 'undefined') return
     try {
-      window.dispatchEvent(new Event('comfystudio-assets-drag-end'))
+      window.dispatchEvent(new Event('vidwright-assets-drag-end'))
     } catch (_) {}
   }
 

@@ -10,7 +10,7 @@
    ============================================= */
 
 :root {
-  /* ---- Velorn (default) ---- */
+  /* ---- Vidwright (default) ---- */
   --sf-dark-950: 3 6 16;
   --sf-dark-900: 8 12 26;
   --sf-dark-800: 17 23 42;
@@ -122,7 +122,7 @@
   --sf-text-muted: 110 110 124;
 }
 
-[data-theme="velorn"] {
+[data-theme="vidwright"] {
   --sf-dark-950: 3 6 16;
   --sf-dark-900: 8 12 26;
   --sf-dark-800: 17 23 42;

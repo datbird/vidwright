@@ -432,7 +432,7 @@ export default function WorkflowBrowser({
               My ComfyUI Workflows
               <span className="ml-1.5 normal-case tracking-normal text-sf-text-muted/70">({customLibrary.workflows.length})</span>
             </h3>
-            <datalist id="velorn-library-categories">
+            <datalist id="vidwright-library-categories">
               {libraryCategories.map((category) => (
                 <option key={category} value={category} />
               ))}
@@ -444,7 +444,7 @@ export default function WorkflowBrowser({
             )}
             {customLibrary.workflows.length === 0 ? (
               <div className="rounded-xl border border-dashed border-sf-dark-600 bg-sf-dark-800/60 px-4 py-6 text-center text-xs text-sf-text-muted">
-                Open any workflow in the ComfyUI tab and hit "Save to Velorn" — it will show up here
+                Open any workflow in the ComfyUI tab and hit "Save to Vidwright" — it will show up here
                 as a one-click launcher.
               </div>
             ) : (
@@ -525,7 +525,7 @@ export default function WorkflowBrowser({
                               type="text"
                               value={categoryValue}
                               autoFocus
-                              list="velorn-library-categories"
+                              list="vidwright-library-categories"
                               placeholder="Category (e.g. text-to-video)"
                               onClick={(event) => event.stopPropagation()}
                               onChange={(event) => setCategoryValue(event.target.value)}

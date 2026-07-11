@@ -1,7 +1,7 @@
-const GENERATION_COMPLETION_SOUND_STORAGE_KEY = 'comfystudio-generation-completion-sound'
+const GENERATION_COMPLETION_SOUND_STORAGE_KEY = 'vidwright-generation-completion-sound'
 let generationCompletionAudioContext = null
 
-export const GENERATION_COMPLETION_SOUND_CHANGED_EVENT = 'comfystudio-generation-completion-sound-changed'
+export const GENERATION_COMPLETION_SOUND_CHANGED_EVENT = 'vidwright-generation-completion-sound-changed'
 
 export const GENERATION_COMPLETION_SOUND_OPTIONS = Object.freeze([
   {

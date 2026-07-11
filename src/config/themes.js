@@ -1,9 +1,9 @@
-export const THEME_STORAGE_KEY = 'comfystudio-theme'
+export const THEME_STORAGE_KEY = 'vidwright-theme'
 
 export const THEMES = [
   {
-    id: 'velorn',
-    label: 'Velorn',
+    id: 'vidwright',
+    label: 'Vidwright',
     description: 'Default brand theme with deep blues, violet, and readable old-gold accents',
     preview: { bg: '#030610', surface: '#11172a', accent: '#987000', text: '#f4eef8' },
   },
@@ -39,7 +39,7 @@ export const THEMES = [
   },
 ]
 
-export const DEFAULT_THEME_ID = 'velorn'
+export const DEFAULT_THEME_ID = 'vidwright'
 
 export function getStoredThemeId() {
   try {

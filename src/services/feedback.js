@@ -7,9 +7,9 @@ import packageJson from '../../package.json'
 import { checkLocalComfyConnection } from './localComfyConnection'
 
 // Update after deploying infra/feedback-worker (see its README).
-const DEFAULT_FEEDBACK_ENDPOINT = 'https://velorn-feedback.jaime-10b.workers.dev'
+const DEFAULT_FEEDBACK_ENDPOINT = 'https://vidwright-feedback.jaime-10b.workers.dev'
 // localStorage override for testing a worker before pointing DNS at it.
-const FEEDBACK_ENDPOINT_OVERRIDE_KEY = 'velorn-feedback-endpoint'
+const FEEDBACK_ENDPOINT_OVERRIDE_KEY = 'vidwright-feedback-endpoint'
 
 export const FEEDBACK_CATEGORIES = [
   { id: 'bug', label: 'Bug' },

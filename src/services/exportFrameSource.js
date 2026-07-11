@@ -28,11 +28,11 @@
  *     unsupported media, and seek() throws on runtime errors — callers
  *     fall back to the existing <video>-element path per clip.
  *
- * Kill switch: set localStorage 'comfystudio-export-webcodecs' = '0'.
+ * Kill switch: set localStorage 'vidwright-export-webcodecs' = '0'.
  */
 import { createFile, DataStream, MP4BoxBuffer } from 'mp4box'
 
-const WEBCODECS_EXPORT_FLAG_KEY = 'comfystudio-export-webcodecs'
+const WEBCODECS_EXPORT_FLAG_KEY = 'vidwright-export-webcodecs'
 
 const MICROS = 1e6
 // Recently-presented frames kept alive for backward re-requests (frame

@@ -122,26 +122,26 @@ function BottomBar({ onOpenSettings, onOpenGettingStarted, projectName }) {
         {projectName || 'Untitled'}
       </div>
       <Separator />
-      {/* Velorn - dropdown: Leave, Settings, Project Selection, Save Project (with dividers) */}
+      {/* Vidwright - dropdown: Leave, Settings, Project Selection, Save Project (with dividers) */}
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((o) => !o)}
           className="flex items-center gap-2 px-2 py-1 rounded text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-800 transition-colors"
-          title="Velorn"
+          title="Vidwright"
         >
           <svg
             className="block h-[14px] w-[45px]"
             viewBox="0 0 52 16"
             role="img"
-            aria-label="Velorn"
+            aria-label="Vidwright"
           >
             <defs>
-              <linearGradient id="velorn-bottombar-gradient" x1="0" y1="0" x2="52" y2="0" gradientUnits="userSpaceOnUse">
+              <linearGradient id="vidwright-bottombar-gradient" x1="0" y1="0" x2="52" y2="0" gradientUnits="userSpaceOnUse">
                 <stop offset="0%" stopColor="#8fcfff" />
                 <stop offset="48%" stopColor="#f8fbff" />
                 <stop offset="100%" stopColor="#f6d985" />
               </linearGradient>
-              <filter id="velorn-bottombar-glow" x="-20%" y="-80%" width="140%" height="260%">
+              <filter id="vidwright-bottombar-glow" x="-20%" y="-80%" width="140%" height="260%">
                 <feDropShadow dx="0" dy="0" stdDeviation="0.8" floodColor="#8fcfff" floodOpacity="0.28" />
                 <feDropShadow dx="0" dy="0" stdDeviation="0.9" floodColor="#f6d985" floodOpacity="0.24" />
               </filter>
@@ -149,17 +149,17 @@ function BottomBar({ onOpenSettings, onOpenGettingStarted, projectName }) {
             <text
               x="0"
               y="12.2"
-              fill="url(#velorn-bottombar-gradient)"
+              fill="url(#vidwright-bottombar-gradient)"
               stroke="rgba(255,255,255,0.24)"
               strokeWidth="0.18"
               paintOrder="stroke fill"
-              filter="url(#velorn-bottombar-glow)"
+              filter="url(#vidwright-bottombar-glow)"
               fontFamily="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
               fontSize="13"
               fontWeight="800"
               letterSpacing="0"
             >
-              Velorn
+              Vidwright
             </text>
           </svg>
           <ChevronDown

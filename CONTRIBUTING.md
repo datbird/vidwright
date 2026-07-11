@@ -1,4 +1,4 @@
-# Contributing to Velorn
+# Contributing to Vidwright
 
 Thanks for contributing.
 

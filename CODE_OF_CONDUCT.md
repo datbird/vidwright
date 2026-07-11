@@ -2,7 +2,7 @@
 
 ## Our Standard
 
-Velorn is committed to a welcoming, respectful, and constructive community.
+Vidwright is committed to a welcoming, respectful, and constructive community.
 
 Examples of behavior that help build that environment:
 

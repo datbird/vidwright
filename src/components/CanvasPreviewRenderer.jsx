@@ -51,7 +51,7 @@ import { createGpuCompositor } from '../services/gpuCompositor'
 import { drawShape, getShapeCanvasRect } from '../utils/shapes'
 
 const PRELOAD_LOOKAHEAD = 2.5
-const PLAYBACK_DIAG_KEY = 'comfystudio-playback-diag'
+const PLAYBACK_DIAG_KEY = 'vidwright-playback-diag'
 const SCRUB_ACTIVE_WINDOW_MS = 220
 const SCRUB_SETTLE_DELAY_MS = SCRUB_ACTIVE_WINDOW_MS + 45
 const SCRUB_READY_TOLERANCE = 0.18
@@ -1582,8 +1582,8 @@ function CanvasPreviewRenderer({
       }
       drawFrameRef.current?.()
     }
-    window.addEventListener('comfystudio:timeline-scrub-end', handleScrubEnd)
-    return () => window.removeEventListener('comfystudio:timeline-scrub-end', handleScrubEnd)
+    window.addEventListener('vidwright:timeline-scrub-end', handleScrubEnd)
+    return () => window.removeEventListener('vidwright:timeline-scrub-end', handleScrubEnd)
   }, [])
 
   useEffect(() => {

@@ -13,7 +13,7 @@
  */
 
 const SETTING_KEY = 'comfyApiKeyComfyOrg'
-const LOCAL_KEY = 'comfystudio-comfy-api-key'
+const LOCAL_KEY = 'vidwright-comfy-api-key'
 
 // Deep link to the Comfy.org dashboard. The exact API-keys page may move,
 // so we land on the login page; once signed in, the user can navigate to
@@ -43,7 +43,7 @@ export const COMFY_PARTNER_WORKFLOWS = Object.freeze([
  * Consumers can listen for it to re-read the key:
  *   window.addEventListener(COMFY_PARTNER_KEY_CHANGED_EVENT, handler)
  */
-export const COMFY_PARTNER_KEY_CHANGED_EVENT = 'comfystudio-partner-key-changed'
+export const COMFY_PARTNER_KEY_CHANGED_EVENT = 'vidwright-partner-key-changed'
 
 /**
  * Event dispatched whenever a queue submission fails because the account is
@@ -55,7 +55,7 @@ export const COMFY_PARTNER_KEY_CHANGED_EVENT = 'comfystudio-partner-key-changed'
  * The detail payload looks like:
  *   { reason: 'insufficient-credits', status: 402, message: '...' }
  */
-export const COMFY_PARTNER_CREDITS_LOW_EVENT = 'comfystudio-partner-credits-low'
+export const COMFY_PARTNER_CREDITS_LOW_EVENT = 'vidwright-partner-credits-low'
 
 export async function getComfyPartnerApiKey() {
   try {

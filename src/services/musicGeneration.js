@@ -13,15 +13,15 @@
  * popover can detect missing models and download them through the existing
  * installWorkflowSetup pipeline.
  *
- * Ownership: outputs use a `velorn_music_` filename prefix, which matches
- * comfyAutoImport's VELORN_MANAGED_OUTPUT_RE, and every queued prompt id is
+ * Ownership: outputs use a `vidwright_music_` filename prefix, which matches
+ * comfyAutoImport's VIDWRIGHT_MANAGED_OUTPUT_RE, and every queued prompt id is
  * registered with comfyPromptGuard — so the auto-import bridge never touches
  * these files and this module is the single importer.
  *
  * Jobs are tracked in a module-level registry with a background poll loop,
  * so a generation finishes and imports even if the UI that queued it (the
  * timeline popover) has been closed. UIs subscribe via the
- * 'velorn-music-jobs-updated' window event.
+ * 'vidwright-music-jobs-updated' window event.
  */
 
 import { comfyui } from './comfyui'
@@ -40,7 +40,7 @@ export const ACE_STEP_MODELS = Object.freeze({
 })
 export const MUSIC_WORKFLOW_ID = 'music-gen'
 export const GENERATED_MUSIC_FOLDER = ['Generated Music']
-export const MUSIC_JOBS_UPDATED_EVENT = 'velorn-music-jobs-updated'
+export const MUSIC_JOBS_UPDATED_EVENT = 'vidwright-music-jobs-updated'
 
 export const MUSIC_DURATION_MIN = 5
 export const MUSIC_DURATION_MAX = 240
@@ -181,7 +181,7 @@ export function buildAceStepWorkflow({
     107: {
       class_type: 'SaveAudioMP3',
       inputs: {
-        filename_prefix: 'audio/velorn_music_ace',
+        filename_prefix: 'audio/vidwright_music_ace',
         quality: 'V0',
         audioUI: '',
         audio: ['18', 0],

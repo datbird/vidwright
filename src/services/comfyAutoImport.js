@@ -2,7 +2,7 @@
  * ComfyUI-tab auto-import bridge.
  *
  * Listens for ComfyUI websocket activity and, for eligible prompts that
- * weren't queued by Velorn's own managed workflow pipeline, pulls the
+ * weren't queued by Vidwright's own managed workflow pipeline, pulls the
  * resulting output files into the current project's `Imported from ComfyUI/`
  * folder. Eligibility is provided by the app shell, currently meaning prompts
  * observed while the embedded ComfyUI tab is active.
@@ -23,7 +23,7 @@
  *                 flatten to individual image assets. Stitched videos get
  *                 a `sequenceSource` metadata blob so an "Unstitch" action
  *                 can undo the stitching later.
- *   - Toggle:     `comfystudio-auto-import-comfy-outputs` (localStorage,
+ *   - Toggle:     `vidwright-auto-import-comfy-outputs` (localStorage,
  *                 default true).
  */
 
@@ -35,7 +35,7 @@ import { isPromptHandledByApp } from './comfyPromptGuard'
 import { classifyBatchOutputs } from './comfyWorkflowGraph'
 import { IMPORTED_COMFY_ASSET_FOLDERS } from '../config/generateWorkspaceConfig'
 
-export const AUTO_IMPORT_SETTING_KEY = 'comfystudio-auto-import-comfy-outputs'
+export const AUTO_IMPORT_SETTING_KEY = 'vidwright-auto-import-comfy-outputs'
 const SEQUENCE_MIN_FRAMES = 8
 
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|mkv|avi|gif)$/i
@@ -67,7 +67,7 @@ function appendLauncherLog(stream, text) {
 // avoid unbounded growth in long sessions.
 const MAX_SIGNATURES = 2000
 const importedSignatures = new Set()
-const VELORN_MANAGED_OUTPUT_RE = /^(director_job_|velorn_|velorn_job_|comfystudio_|comfystudio_job_|flow_ai_|topaz_video_upscale_|comfystudiomask_|VelornMask_)/i
+const VIDWRIGHT_MANAGED_OUTPUT_RE = /^(director_job_|vidwright_|vidwright_job_|vidwright_|vidwright_job_|flow_ai_|topaz_video_upscale_|vidwrightmask_|VidwrightMask_)/i
 const MAX_ELIGIBLE_PROMPT_IDS = 300
 const eligibleUnmanagedPromptIds = new Set()
 let runtimeOptions = {}
@@ -129,9 +129,9 @@ function sameSourceText(left, right) {
   return normalizeSourceText(left).toLowerCase() === normalizeSourceText(right).toLowerCase()
 }
 
-function isVelornManagedOutput(fileDesc) {
+function isVidwrightManagedOutput(fileDesc) {
   const filename = normalizeSourceText(fileDesc?.filename)
-  return VELORN_MANAGED_OUTPUT_RE.test(filename)
+  return VIDWRIGHT_MANAGED_OUTPUT_RE.test(filename)
 }
 
 function getAutoImportSourceFields(fileDesc, promptId) {
@@ -507,7 +507,7 @@ async function runImportPipeline(promptId, preFetchedEntry, projectDir) {
   const fresh = allOutputFiles.filter((f) => {
     const sig = sigFor(f)
     if (!sig) return false
-    if (isVelornManagedOutput(f)) {
+    if (isVidwrightManagedOutput(f)) {
       importedSignatures.add(sig)
       return false
     }
@@ -593,7 +593,7 @@ async function runImportPipeline(promptId, preFetchedEntry, projectDir) {
 
 async function importSingleFile({ file, kind, apiWorkflow, promptId, projectDir }) {
   const sig = sigFor(file)
-  if (isVelornManagedOutput(file)) {
+  if (isVidwrightManagedOutput(file)) {
     if (sig) importedSignatures.add(sig)
     return
   }
@@ -814,7 +814,7 @@ async function importStitchedSequence({ classification, apiWorkflow, promptId, p
 // {node:null}`, `execution_error`) with `broadcast=False` — only to the
 // websocket client that originally queued the prompt. When the user
 // queues from the embedded ComfyUI tab (its own client_id), an external
-// browser, or CLI, Velorn's websocket never sees these events.
+// browser, or CLI, Vidwright's websocket never sees these events.
 //
 // What *is* broadcast to every connected client:
 //   - `executing` for each node (broadcast=True)

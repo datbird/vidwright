@@ -1,7 +1,7 @@
-# Build ComfyStudio Linux artifacts (AppImage + deb) inside a Linux container.
+# Build Vidwright Linux artifacts (AppImage + deb) inside a Linux container.
 # Run from project root:
-#   docker build --platform linux/amd64 -f Dockerfile.linux-build -t comfystudio-linux-build .
-#   docker run --rm -v "$(pwd)/release:/out" comfystudio-linux-build sh -lc 'cp -R /app/release/. /out/'
+#   docker build --platform linux/amd64 -f Dockerfile.linux-build -t vidwright-linux-build .
+#   docker run --rm -v "$(pwd)/release:/out" vidwright-linux-build sh -lc 'cp -R /app/release/. /out/'
 #
 # Artifacts will appear in ./release/
 

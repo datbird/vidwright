@@ -8,7 +8,7 @@ import {
 } from '../services/feedback'
 
 const DIAGNOSTIC_LABELS = [
-  ['appVersion', 'Velorn version'],
+  ['appVersion', 'Vidwright version'],
   ['platform', 'Platform'],
   ['os', 'OS'],
   ['gpu', 'GPU'],

@@ -1,7 +1,7 @@
 /**
  * Pexels API key storage – works in Electron (settings) and web (localStorage).
  */
-const PEXELS_KEY_STORAGE = 'comfystudio-pexels-api-key'
+const PEXELS_KEY_STORAGE = 'vidwright-pexels-api-key'
 
 export async function getPexelsApiKey() {
   if (typeof window !== 'undefined' && window.electronAPI?.getSetting) {

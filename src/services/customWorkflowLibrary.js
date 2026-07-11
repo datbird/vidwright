@@ -2,7 +2,7 @@
 // tab. Launcher model — each entry stores the UI-format graph so a click can
 // load it straight back into the tab. No forms, no bindings; the only
 // conversion is on-demand UI→API when an entry is promoted into a Director
-// custom slot (VELORN node-title contract).
+// custom slot (VIDWRIGHT node-title contract).
 
 import { getLocalComfyConnectionSync } from './localComfyConnection'
 import { openUiWorkflowInComfyUi } from './workflowSetupManager'
@@ -13,7 +13,7 @@ import {
 } from './comfyui'
 
 const CUSTOM_WORKFLOWS_DIR_NAME = 'custom-workflows'
-export const CUSTOM_WORKFLOW_LIBRARY_CHANGED_EVENT = 'comfystudio:custom-workflow-library-changed'
+export const CUSTOM_WORKFLOW_LIBRARY_CHANGED_EVENT = 'vidwright:custom-workflow-library-changed'
 
 const entriesById = new Map()
 let loadPromise = null
@@ -324,7 +324,7 @@ function injectMarkerStubNodes(graph, kind, missingKeys) {
   if (added.length > 0) {
     if (!Array.isArray(graph.groups)) graph.groups = []
     graph.groups.push({
-      title: 'Velorn: wire these in, then save to My Workflows',
+      title: 'Vidwright: wire these in, then save to My Workflows',
       bounding: [startX - 20, minY - 60, 440, y - minY + 20],
       color: '#3f789e',
       font_size: 24,
@@ -336,7 +336,7 @@ function injectMarkerStubNodes(graph, kind, missingKeys) {
 
 /**
  * Open a saved workflow in the embedded ComfyUI tab with any missing
- * VELORN marker nodes for the given slot injected off to the side of the
+ * VIDWRIGHT marker nodes for the given slot injected off to the side of the
  * graph. The user wires them in and re-saves to My Workflows — no guessing
  * about which existing nodes to retitle.
  */
@@ -357,7 +357,7 @@ export async function openCustomLibraryWorkflowWithMarkerStubs(id, kind = 'keyfr
   }
 }
 
-/** Read a saved workflow's UI-format graph (e.g. for VELORN marker scans). */
+/** Read a saved workflow's UI-format graph (e.g. for VIDWRIGHT marker scans). */
 export async function readCustomLibraryWorkflowGraph(id) {
   await loadCustomWorkflowLibrary()
   const entry = entriesById.get(String(id || '').trim())

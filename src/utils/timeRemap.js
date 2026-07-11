@@ -12,12 +12,12 @@
  * Scope: video ramping only. Reverse clips and linked audio keep constant
  * speed. Timeline duration stays fixed; running past the trimmed source
  * clamps (freeze on the last frame). Kill switch:
- * localStorage 'comfystudio-speed-ramp' = '0'.
+ * localStorage 'vidwright-speed-ramp' = '0'.
  */
 
 import { getValueAtTime } from './keyframes'
 
-const SPEED_RAMP_FLAG_KEY = 'comfystudio-speed-ramp'
+const SPEED_RAMP_FLAG_KEY = 'vidwright-speed-ramp'
 const INTEGRAL_SAMPLES_PER_SECOND = 240
 const MIN_RAMP_SPEED = 0.05
 const MAX_RAMP_SPEED = 16

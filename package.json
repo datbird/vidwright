@@ -1,5 +1,5 @@
 {
-  "name": "velorn",
+  "name": "vidwright",
   "version": "0.3.2",
   "description": "AI-native video editing built around real creative timelines, generative workflows, and local agent control.",
   "main": "electron/main.js",
@@ -28,14 +28,14 @@
     "video-editing",
     "electron"
   ],
-  "author": "Velorn contributors",
+  "author": "Vidwright contributors (a fork of Velorn — https://github.com/VelornLabs/velorn)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/VelornLabs/velorn.git"
+    "url": "git+https://github.com/datbird/vidwright.git"
   },
-  "homepage": "https://velorn.ai",
+  "homepage": "https://vidwright.ai",
   "bugs": {
-    "url": "https://github.com/VelornLabs/velorn/issues"
+    "url": "https://github.com/datbird/vidwright/issues"
   },
   "license": "GPL-3.0-only",
   "dependencies": {
@@ -69,8 +69,8 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.comfystudio.app",
-    "productName": "Velorn",
+    "appId": "com.vidwright.app",
+    "productName": "Vidwright",
     "copyright": "Copyright © 2024-2026",
     "asarUnpack": [
       "**/node_modules/ffmpeg-static/**",
@@ -130,8 +130,8 @@
       "azureSignOptions": {
         "publisherName": "Jaime Aguirre",
         "endpoint": "https://eus.codesigning.azure.net",
-        "codeSigningAccountName": "velorn-signing",
-        "certificateProfileName": "velorn-public"
+        "codeSigningAccountName": "vidwright-signing",
+        "certificateProfileName": "vidwright-public"
       }
     },
     "mac": {
@@ -166,7 +166,7 @@
       ],
       "icon": "build/icons",
       "category": "Video",
-      "maintainer": "Velorn contributors <opensource@velorn.ai>",
+      "maintainer": "Vidwright contributors <opensource@vidwright.ai>",
       "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
     },
     "nsis": {

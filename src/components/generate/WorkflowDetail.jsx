@@ -338,7 +338,7 @@ export default function WorkflowDetail({
                   Choose your ComfyUI folder
                 </button>
                 <div className="mt-1.5 text-center text-[10px] text-sf-text-muted">
-                  {setup.rootValidation?.error || 'Point Velorn at your ComfyUI install so it can download the missing files for you.'}
+                  {setup.rootValidation?.error || 'Point Vidwright at your ComfyUI install so it can download the missing files for you.'}
                 </div>
               </>
             )}

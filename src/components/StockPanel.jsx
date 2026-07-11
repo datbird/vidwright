@@ -12,7 +12,7 @@ const PEXELS_VIDEOS_URL = 'https://api.pexels.com/videos/search'
 const PEXELS_CURATED_PHOTOS_URL = 'https://api.pexels.com/v1/curated'
 const PEXELS_POPULAR_VIDEOS_URL = 'https://api.pexels.com/videos/popular'
 const PER_PAGE = 20
-const STOCK_PANEL_STORAGE_KEY = 'comfystudio-stock-panel-state-v1'
+const STOCK_PANEL_STORAGE_KEY = 'vidwright-stock-panel-state-v1'
 
 function loadPersistedStockState() {
   try {

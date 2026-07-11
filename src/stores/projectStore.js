@@ -241,7 +241,7 @@ export const useProjectStore = create(
       lastAutoSave: null,
 
       // Startup behavior (persisted)
-      // When false (default), Velorn lands on the project picker so
+      // When false (default), Vidwright lands on the project picker so
       // users can explicitly choose what to work on (Resolve-style hub).
       // Power users can flip this on to jump straight back into their
       // last project.
@@ -295,7 +295,7 @@ export const useProjectStore = create(
           
           // Try to restore current project (only when the user has opted
           // in via Settings → General → "Reopen last project on startup").
-          // By default Velorn lands on the project picker instead.
+          // By default Vidwright lands on the project picker instead.
           const shouldReopenLast = get().reopenLastProjectOnStartup === true
           const storedProject = shouldReopenLast
             ? await getStoredDirectoryHandle('currentProject')
@@ -1233,7 +1233,7 @@ export const useProjectStore = create(
       },
 
       /**
-       * Toggle whether Velorn should reopen the last project on
+       * Toggle whether Vidwright should reopen the last project on
        * startup (true) or show the project picker (false, default).
        */
       setReopenLastProjectOnStartup: (enabled) => {
@@ -1271,7 +1271,7 @@ export const useProjectStore = create(
       },
     }),
     {
-      name: 'comfystudio-project', // localStorage key
+      name: 'vidwright-project', // localStorage key
       partialize: (state) => ({
         // Only persist these fields
         recentProjects: state.recentProjects,

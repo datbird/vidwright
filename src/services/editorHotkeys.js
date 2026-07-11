@@ -1,5 +1,5 @@
-const EDITOR_HOTKEYS_STORAGE_KEY = 'comfystudio-editor-hotkeys-v1'
-export const EDITOR_HOTKEYS_CHANGED_EVENT = 'comfystudio-editor-hotkeys-changed'
+const EDITOR_HOTKEYS_STORAGE_KEY = 'vidwright-editor-hotkeys-v1'
+export const EDITOR_HOTKEYS_CHANGED_EVENT = 'vidwright-editor-hotkeys-changed'
 
 export const EDITOR_HOTKEY_IDS = {
   TOGGLE_SNAPPING: 'timeline.toggleSnapping',
@@ -140,8 +140,8 @@ export const DEFAULT_EDITOR_HOTKEYS = EDITOR_HOTKEY_DEFINITIONS.reduce((acc, def
 
 export const EDITOR_HOTKEY_PRESETS = [
   {
-    id: 'comfystudio',
-    label: 'Velorn',
+    id: 'vidwright',
+    label: 'Vidwright',
     description: 'Current default editor bindings.',
     bindings: { ...DEFAULT_EDITOR_HOTKEYS },
   },

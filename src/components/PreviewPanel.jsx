@@ -23,7 +23,7 @@ import { getGlslPreviewQualityScale } from '../utils/glslEffects'
 import { getShapeCanvasRect } from '../utils/shapes'
 import { getClipQuadCorners } from '../services/exporter'
 
-const SPACE_MODIFIER_USED_EVENT = 'comfystudio-space-modifier-used'
+const SPACE_MODIFIER_USED_EVENT = 'vidwright-space-modifier-used'
 
 function notifySpaceModifierUsed() {
   if (typeof window === 'undefined') return
@@ -507,7 +507,7 @@ function PreviewPanel() {
     }
 
     // Expose preview scale so downstream layers (e.g. text) can match output framing.
-    style['--comfystudio-preview-scale'] = String(previewScaleUniform)
+    style['--vidwright-preview-scale'] = String(previewScaleUniform)
     
     return style
   }
@@ -1805,7 +1805,7 @@ function PreviewPanel() {
           setCapturingFrameForAI(false)
           if (result) {
             setFrameForAI({ ...result, mode: 'extend' })
-            window.dispatchEvent(new CustomEvent('comfystudio-open-generate-with-frame'))
+            window.dispatchEvent(new CustomEvent('vidwright-open-generate-with-frame'))
           }
         })
         break
@@ -1820,7 +1820,7 @@ function PreviewPanel() {
           setCapturingFrameForAI(false)
           if (result) {
             setFrameForAI({ ...result, mode: 'keyframe' })
-            window.dispatchEvent(new CustomEvent('comfystudio-open-generate-with-frame'))
+            window.dispatchEvent(new CustomEvent('vidwright-open-generate-with-frame'))
           }
         })
         break
