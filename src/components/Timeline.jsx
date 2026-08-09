@@ -1,12 +1,13 @@
-import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, memo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   Volume2, VolumeX, Lock, Unlock, Link, Unlink, Eye, EyeOff,
   Plus, Video, Type, Image as ImageIcon,
   Sparkles, GripVertical, Magnet, ArrowRightLeft, Square, X, Check, Pencil,
   Diamond, Zap, AlertTriangle, Loader2, ChevronLeft, ChevronRight, Maximize2, Flag, Scissors, Clock,
-  Copy, ClipboardPaste, Trash2, Music as MusicIcon,
+  Copy, ClipboardPaste, Trash2, Music as MusicIcon, MoreHorizontal,
 } from 'lucide-react'
-import useTimelineStore, { buildClipSyncLock, isMusicVideoSyncCapableClip, isSyncLockedClip } from '../stores/timelineStore'
+import useTimelineStore, { buildClipSyncLock, isMusicVideoSyncCapableClip, isSyncLockedClip, isCaptionsTrack, isCaptionClip } from '../stores/timelineStore'
 import useProjectStore from '../stores/projectStore'
 import renderCacheService from '../services/renderCache'
 import { isClipRenderable, renderClipToCache } from '../services/clipRenderCache'
@@ -42,6 +43,8 @@ import {
 import MasterAudioMeter from './AudioMeter'
 import GenerateMusicPopover from './GenerateMusicPopover'
 import { analyzeAudioSource } from '../services/audioAnalysis'
+import { getClipPlaybackTimeAtTimeline } from './CanvasPreviewRenderer'
+import { canRevealAssetInFileManager, getRevealInFileManagerLabel, revealAssetInFileManager } from '../utils/revealInFileManager'
 
 const TRANSITION_DEFAULT_DURATION_KEY = 'vidwright-transition-default-duration-frames'
 const DEFAULT_WAVEFORM_SAMPLES = 8192
@@ -201,7 +204,7 @@ const parseFrameOffsetInput = (value, fps) => {
 
 const getClipSourceDurationForExtension = (clip) => {
   if (!clip) return Infinity
-  if (clip.type === 'image' || clip.type === 'adjustment' || clip.type === 'text' || clip.type === 'shape') return Infinity
+  if (clip.type === 'image' || clip.type === 'adjustment' || clip.type === 'text' || clip.type === 'shape' || clip.type === 'captions') return Infinity
   const raw = clip.sourceDuration
   if (raw === Infinity || raw === 'Infinity') return Infinity
   const parsed = Number(raw)
@@ -211,7 +214,7 @@ const getClipSourceDurationForExtension = (clip) => {
 }
 
 const isInfinitelyExtendableClip = (clip) => (
-  clip?.type === 'image' || clip?.type === 'adjustment' || clip?.type === 'text' || clip?.type === 'shape'
+  clip?.type === 'image' || clip?.type === 'adjustment' || clip?.type === 'text' || clip?.type === 'shape' || clip?.type === 'captions'
 )
 
 const getAudioWaveformContext = () => {
@@ -495,8 +498,77 @@ function AudioWaveformBars({ clip, clipWidth, clipUrl, waveformInput = null, ste
   )
 }
 
-function Timeline({ onActiveToolChange }) {
+// Timeline subscribes to every store field it renders EXCEPT playheadPosition:
+// that field changes every animation frame during playback and scrubbing, and
+// re-rendering the full clip area per tick is the difference between ~17 and
+// ~24 fps on a 160-clip timeline. The playhead line updates imperatively via
+// a direct store subscription; handlers read the live value from getState().
+const TIMELINE_STORE_KEYS = [
+  'duration', 'zoom', 'tracks', 'clips', 'transitions', 'selectedClipIds',
+  'selectedTransitionId', 'selectedGap', 'activeTrackId',
+  'showTimelineClipThumbnails', 'setActiveTrack', 'snappingEnabled',
+  'activeSnapTime', 'rippleEditMode', 'inPoint', 'outPoint',
+  'rangeRenderState', 'markers', 'selectedMarkerId', 'addClip', 'addTextClip',
+  'addShapeClip', 'removeClip', 'removeSelectedClips', 'rippleDeleteClipIds',
+  'rippleDeleteSelectedClips', 'rippleDeleteSelectedGap', 'moveClip',
+  'moveSelectedClips', 'setSelectedClipsStartTimes', 'setSelectedClipPositions',
+  'duplicateClipsForDrag', 'removeDragDuplicates',
+  'resizeClip', 'updateClipTrim', 'updateAudioClipProperties', 'selectClip',
+  'selectClips', 'clearSelection', 'setPlayheadPosition', 'setZoom',
+  'toggleTrackMute', 'toggleTrackSolo', 'toggleTrackLock', 'toggleTrackVisibility',
+  'setClipsEnabled', 'setClipLabelColor', 'addTrack', 'addTransition',
+  'removeTransition', 'updateTransition', 'selectTransition',
+  'getMaxTransitionDuration', 'addMaskEffect', 'addEffect', 'toggleSnapping',
+  'toggleRippleEdit', 'setActiveSnapTime', 'clearActiveSnap', 'removeTrack',
+  'renameTrack', 'reorderTrack', 'undo', 'redo', 'canUndo', 'canRedo',
+  'saveToHistory', 'clearClipCache', 'requestMaskPicker', 'requestTextEdit',
+  'copySelectedClips', 'pasteClipsAtPlayhead', 'copiedClips',
+  'getLinkedClipIds', 'linkSelectedClips', 'unlinkSelectedClips',
+  'lockSyncClips', 'unlockSyncLockedClips', 'addMarker', 'removeMarker',
+  'selectMarker', 'selectGap', 'addAdjustmentClip',
+]
+const pickTimelineStoreSlice = (state) => {
+  const slice = {}
+  for (const key of TIMELINE_STORE_KEYS) slice[key] = state[key]
+  return slice
+}
+
+// Ruler ticks live in their own memoized component: at frame-level zoom a
+// long timeline emits thousands of tick elements, and re-reconciling them on
+// every playhead tick during playback dwarfs the rest of the ruler. Props
+// only change on zoom/duration/fps changes, so playback skips this subtree.
+const RulerTickMarks = memo(function RulerTickMarks({ major, minor, pixelsPerSecond, timecodeFps }) {
+  return (
+    <>
+      {/* Minor ticks */}
+      {minor.map((time) => (
+        <div
+          key={`minor-${time}`}
+          className="absolute bottom-0 w-px h-1.5 bg-sf-dark-600/80 pointer-events-none"
+          style={{ left: `${time * pixelsPerSecond}px` }}
+        />
+      ))}
+
+      {/* Major ticks + timecode labels */}
+      {major.map((time) => (
+        <div
+          key={`major-${time}`}
+          className="absolute top-0 bottom-0 pointer-events-none"
+          style={{ left: `${time * pixelsPerSecond}px` }}
+        >
+          <div className="absolute bottom-0 w-px h-2.5 bg-sf-dark-500/95" />
+          <span className="absolute top-0.5 left-1 text-[9px] text-sf-text-muted font-mono tracking-tight whitespace-nowrap">
+            {formatFrameTimecode(time, timecodeFps)}
+          </span>
+        </div>
+      ))}
+    </>
+  )
+})
+
+function Timeline({ onActiveToolChange, onStatusChange }) {
   const timelineRef = useRef(null)
+  const playheadElRef = useRef(null)
   const trackHeadersRef = useRef(null)
   const trackContentRef = useRef(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -525,6 +597,15 @@ function Timeline({ onActiveToolChange }) {
   const TRACK_HEIGHT_MIN = 32
   const TRACK_HEIGHT_MAX = 220
   const TRACK_HEIGHTS_STORAGE_KEY = 'vidwright-timeline-track-heights-v1'
+  const TRACK_HEIGHT_PRESET_STORAGE_KEY = 'vidwright-timeline-track-height-preset'
+  // Per-type heights for each preset. 'normal' matches the classic defaults;
+  // compact flattens everything to the minimum so dense timelines fit on
+  // screen; new tracks follow the active preset via getDefaultTrackHeight.
+  const TRACK_HEIGHT_PRESETS = {
+    compact: { video: TRACK_HEIGHT_MIN, mono: TRACK_HEIGHT_MIN, stereo: TRACK_HEIGHT_MIN },
+    normal: { video: VIDEO_TRACK_HEIGHT_DEFAULT, mono: AUDIO_TRACK_HEIGHT_MONO_DEFAULT, stereo: AUDIO_TRACK_HEIGHT_STEREO_DEFAULT },
+    tall: { video: 80, mono: 64, stereo: 128 },
+  }
   const [trackHeadersWidth, setTrackHeadersWidth] = useState(() => {
     try {
       const w = localStorage.getItem(TRACK_HEADERS_STORAGE_KEY)
@@ -555,11 +636,28 @@ function Timeline({ onActiveToolChange }) {
     } catch (_) {}
     return TIMELINE_TOOLS.AUTO
   })
+  const [trackHeightPreset, setTrackHeightPreset] = useState(() => {
+    try {
+      const saved = localStorage.getItem(TRACK_HEIGHT_PRESET_STORAGE_KEY)
+      if (saved && TRACK_HEIGHT_PRESETS[saved]) return saved
+    } catch (_) {}
+    return 'normal'
+  })
 
   const getDefaultTrackHeight = (track) => {
-    if (!track) return VIDEO_TRACK_HEIGHT_DEFAULT
-    if (track.type === 'video') return VIDEO_TRACK_HEIGHT_DEFAULT
-    return track.channels === 'mono' ? AUDIO_TRACK_HEIGHT_MONO_DEFAULT : AUDIO_TRACK_HEIGHT_STEREO_DEFAULT
+    const preset = TRACK_HEIGHT_PRESETS[trackHeightPreset] || TRACK_HEIGHT_PRESETS.normal
+    if (!track) return preset.video
+    if (track.type === 'video') return preset.video
+    return track.channels === 'mono' ? preset.mono : preset.stereo
+  }
+
+  // Switching presets clears per-track drag overrides so the result is
+  // uniform; individual tracks can still be dragged afterward.
+  const applyTrackHeightPreset = (presetName) => {
+    if (!TRACK_HEIGHT_PRESETS[presetName]) return
+    setTrackHeightPreset(presetName)
+    setTrackHeights({})
+    try { localStorage.setItem(TRACK_HEIGHT_PRESET_STORAGE_KEY, presetName) } catch (_) {}
   }
 
   const getTrackHeight = (track) => {
@@ -622,6 +720,9 @@ function Timeline({ onActiveToolChange }) {
   // Clip dragging state (moving clips within timeline)
   const [clipDragState, setClipDragState] = useState(null) // { clipId, startX, originalStartTime, originalTrackId }
   const clipDragHistorySavedRef = useRef(false)
+  // Ids spawned by the Alt-drag duplicate gesture; lives outside clipDragState
+  // because the drag effect re-runs (and would tear down state) on every move.
+  const dragDuplicatesRef = useRef(null)
   
   // Marquee selection state
   const [marqueeState, setMarqueeState] = useState(null) // { startX, startY, currentX, currentY, scrollLeft, scrollTop }
@@ -747,7 +848,6 @@ function Timeline({ onActiveToolChange }) {
   const {
     duration,
     zoom,
-    playheadPosition,
     tracks,
     clips,
     transitions,
@@ -777,6 +877,8 @@ function Timeline({ onActiveToolChange }) {
     moveSelectedClips,
     setSelectedClipsStartTimes,
     setSelectedClipPositions,
+    duplicateClipsForDrag,
+    removeDragDuplicates,
     resizeClip,
     updateClipTrim,
     updateAudioClipProperties,
@@ -786,6 +888,7 @@ function Timeline({ onActiveToolChange }) {
     setPlayheadPosition,
     setZoom,
     toggleTrackMute,
+    toggleTrackSolo,
     toggleTrackLock,
     toggleTrackVisibility,
     setClipsEnabled,
@@ -826,7 +929,24 @@ function Timeline({ onActiveToolChange }) {
     selectMarker,
     selectGap,
     addAdjustmentClip,
-  } = useTimelineStore()
+  } = useTimelineStore(useShallow(pickTimelineStoreSlice))
+
+  // Deliberately not subscribed (see TIMELINE_STORE_KEYS): read the playhead
+  // live wherever a handler or render-time expression needs the current value.
+  const getLivePlayhead = () => useTimelineStore.getState().playheadPosition
+
+  // Clip/gap/selection readout for the status corner — moved out of the
+  // toolbar, where it was occupying button real estate on narrow widths.
+  const selectedGapSeconds = selectedGap ? Math.max(0, selectedGap.endTime - selectedGap.startTime) : null
+  useEffect(() => {
+    if (typeof onStatusChange !== 'function') return undefined
+    const parts = []
+    if (selectedClipIds.length > 1) parts.push(`${selectedClipIds.length} selected`)
+    if (selectedGapSeconds != null) parts.push(`Gap ${selectedGapSeconds.toFixed(2)}s`)
+    parts.push(`${clips.length} clips`)
+    onStatusChange(parts.join(' · '))
+    return () => onStatusChange('')
+  }, [onStatusChange, selectedClipIds.length, selectedGapSeconds, clips.length])
 
   const {
     currentProjectHandle,
@@ -860,17 +980,17 @@ function Timeline({ onActiveToolChange }) {
     const targetTrack = preferredVideoTrack
     if (!targetTrack) return null
 
-    const newClip = addTextClip(targetTrack.id, options, playheadPosition)
+    const newClip = addTextClip(targetTrack.id, options, getLivePlayhead())
     if (newClip) {
       requestTextEdit(newClip.id, { selectAll: true })
     }
     return newClip
-  }, [preferredVideoTrack, addTextClip, playheadPosition, requestTextEdit])
+  }, [preferredVideoTrack, addTextClip, requestTextEdit])
   const addShapeClipAtPlayhead = useCallback((options = {}) => {
     const targetTrack = preferredVideoTrack
     if (!targetTrack) return null
-    return addShapeClip(targetTrack.id, options, playheadPosition)
-  }, [preferredVideoTrack, addShapeClip, playheadPosition])
+    return addShapeClip(targetTrack.id, options, getLivePlayhead())
+  }, [preferredVideoTrack, addShapeClip])
   const handleUndoAction = useCallback(() => {
     if (projectCanUndo && (!canUndo() || projectHistoryLastChangedAt > timelineHistoryLastChangedAt)) {
       return undoTimelineStructureChange()
@@ -884,6 +1004,8 @@ function Timeline({ onActiveToolChange }) {
     return redo()
   }, [projectCanRedo, canRedo, projectHistoryLastChangedAt, timelineHistoryLastChangedAt, redoTimelineStructureChange, redo])
   const markerHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.ADD_MARKER])
+  const matchFrameHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.MATCH_FRAME])
+  const revealInAssetsHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.REVEAL_IN_ASSETS])
   const splitAllHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.SPLIT_ALL])
   const splitActiveHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.SPLIT_ACTIVE])
   const selectFromStartHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.SELECT_FROM_START])
@@ -977,6 +1099,73 @@ function Timeline({ onActiveToolChange }) {
       addToSelection: e.shiftKey || e.ctrlKey || e.metaKey,
     })
   }, [getTimeFromMouseEvent, getTimelinePointerPosition, getTrackGapAtTime])
+  // Match Frame: open the clip's source asset in the preview source player,
+  // parked on the exact source frame under the playhead, with the clip's
+  // trimmed range pre-marked as In/Out. Reads all state via getState() so
+  // the keydown effect can call it without dependency churn.
+  const openMatchFrameForClip = useCallback((targetClip) => {
+    if (!targetClip || (targetClip.type !== 'video' && targetClip.type !== 'audio')) return false
+    const assetsState = useAssetsStore.getState()
+    const asset = targetClip.assetId ? assetsState.getAssetById(targetClip.assetId) : null
+    if (!asset || (asset.type !== 'video' && asset.type !== 'audio')) return false
+
+    const playhead = getLivePlayhead()
+    const clipStart = Number(targetClip.startTime) || 0
+    const clipEnd = clipStart + (Number(targetClip.duration) || 0)
+    const playheadInside = playhead >= clipStart && playhead < clipEnd
+    // Same speed/ramp/reverse/trim math the preview uses, so the source
+    // player lands on the frame the monitor is showing.
+    const seekTime = playheadInside
+      ? getClipPlaybackTimeAtTimeline(targetClip, playhead, 0)
+      : (Number(targetClip.trimStart) || 0)
+
+    const trimStart = Number(targetClip.trimStart) || 0
+    const trimEnd = Number(targetClip.trimEnd)
+    const inPoint = Number.isFinite(trimEnd) ? Math.min(trimStart, trimEnd) : trimStart
+    const outPoint = Number.isFinite(trimEnd) ? Math.max(trimStart, trimEnd) : null
+
+    const timelineState = useTimelineStore.getState()
+    if (timelineState.isPlaying) timelineState.togglePlay()
+    assetsState.requestSourceSeed({ assetId: asset.id, seekTime, inPoint, outPoint })
+    assetsState.setPreview(asset)
+    return true
+    // getLivePlayhead only reads the store; omitting it keeps this stable.
+  }, [])
+
+  // Hotkey target: a selected clip passing the predicate (preferring one
+  // under the playhead), else the active track's clip at the playhead — the
+  // Premiere "targeted track" idiom adapted to Vidwright's active track.
+  const resolveTargetedClip = useCallback((predicate) => {
+    const state = useTimelineStore.getState()
+    const playhead = getLivePlayhead()
+    const containsPlayhead = (clip) => playhead >= (Number(clip.startTime) || 0)
+      && playhead < (Number(clip.startTime) || 0) + (Number(clip.duration) || 0)
+    const selected = (state.selectedClipIds || [])
+      .map((id) => (state.clips || []).find((clip) => clip.id === id))
+      .filter(predicate)
+    if (selected.length > 0) return selected.find(containsPlayhead) || selected[0]
+    return (state.clips || []).find((clip) => (
+      clip.trackId === state.activeTrackId && predicate(clip) && containsPlayhead(clip)
+    )) || null
+    // getLivePlayhead only reads the store; omitting it keeps this stable.
+  }, [])
+
+  const isMatchFrameClip = (clip) => Boolean(clip && (clip.type === 'video' || clip.type === 'audio') && clip.assetId)
+  const resolveMatchFrameClip = useCallback(
+    () => resolveTargetedClip(isMatchFrameClip),
+    [resolveTargetedClip]
+  )
+
+  // Reveal works for anything backed by an asset — images included.
+  const isRevealableClip = (clip) => Boolean(clip && clip.assetId)
+  const revealClipInAssetsPanel = useCallback((targetClip) => {
+    if (!isRevealableClip(targetClip)) return false
+    const asset = useAssetsStore.getState().getAssetById(targetClip.assetId)
+    if (!asset) return false
+    window.dispatchEvent(new CustomEvent('vidwright-reveal-asset', { detail: { assetId: asset.id } }))
+    return true
+  }, [])
+
   const handleTrackLaneContextMenu = useCallback((e, track) => {
     if (!track || track.locked) return
     if (
@@ -1147,12 +1336,15 @@ function Timeline({ onActiveToolChange }) {
   )
   const activeTrackClipAtPlayhead = useMemo(() => {
     if (!activeTrackId) return null
+    const playheadPosition = getLivePlayhead()
     return clips.find(
       (clip) => clip.trackId === activeTrackId
         && playheadPosition > clip.startTime
         && playheadPosition < clip.startTime + clip.duration
     ) || null
-  }, [activeTrackId, clips, playheadPosition])
+    // getLivePlayhead is intentionally unreactive: this value feeds toolbar
+    // enablement, which any interaction re-render refreshes soon enough.
+  }, [activeTrackId, clips])
   const canDeleteCurrentSelection = selectedClipIds.length > 0
     || Boolean(selectedGap)
     || Boolean(selectedTransitionId)
@@ -1198,6 +1390,57 @@ function Timeline({ onActiveToolChange }) {
     copySelectedClips()
     return true
   }, [copySelectedClips, selectedClipIds])
+
+  // Responsive toolbar: full (icon+label) → compact (icons only, tooltips
+  // carry the labels) → overflow (low-priority groups spill into a ⋯ menu;
+  // the scrollable strip remains as the last-resort fallback).
+  // The tier is MEASURED, not guessed: a layout effect downgrades pre-paint
+  // whenever the strip's content overflows its width, recording how much
+  // width that tier actually needed; it upgrades (optimistically when the
+  // need is unknown — a failed attempt bounces back before paint) once that
+  // much width plus a hysteresis buffer is available again.
+  const toolbarScrollRef = useRef(null)
+  const toolbarTierNeedsRef = useRef({})
+  const [toolbarTier, setToolbarTier] = useState('full')
+  const [toolbarOverflowOpen, setToolbarOverflowOpen] = useState(false)
+  const [toolbarOverflowAnchor, setToolbarOverflowAnchor] = useState(null)
+  const [, forceToolbarMeasure] = useState(0)
+  useEffect(() => {
+    const el = toolbarScrollRef.current
+    if (!el) return undefined
+    const observer = new ResizeObserver(() => forceToolbarMeasure((n) => n + 1))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+  useLayoutEffect(() => {
+    const el = toolbarScrollRef.current
+    if (!el) return
+    const width = el.clientWidth
+    const HYSTERESIS = 32
+    const needs = toolbarTierNeedsRef.current
+    if (el.scrollWidth > width + 1) {
+      needs[toolbarTier] = el.scrollWidth
+      if (toolbarTier === 'full') setToolbarTier('compact')
+      else if (toolbarTier === 'compact') setToolbarTier('overflow')
+      return
+    }
+    if (toolbarTier === 'overflow' && (!needs.compact || width >= needs.compact + HYSTERESIS)) {
+      setToolbarTier('compact')
+    } else if (toolbarTier === 'compact' && (!needs.full || width >= needs.full + HYSTERESIS)) {
+      setToolbarTier('full')
+    }
+  })
+  const showToolbarLabels = toolbarTier === 'full'
+  useEffect(() => {
+    if (toolbarTier !== 'overflow') setToolbarOverflowOpen(false)
+  }, [toolbarTier])
+  useEffect(() => {
+    if (!toolbarOverflowOpen) return undefined
+    const close = () => setToolbarOverflowOpen(false)
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [toolbarOverflowOpen])
+  const overflowMenuItemClass = 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] text-sf-text-secondary transition-colors hover:bg-sf-dark-700 hover:text-sf-text-primary disabled:cursor-not-allowed disabled:opacity-45'
 
   const toolbarSectionClass = 'inline-flex h-6 items-center gap-0.5 rounded-md border border-sf-dark-700/80 bg-sf-dark-900/55 px-0.5'
   const toolbarButtonClass = 'inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] text-sf-text-secondary transition-colors hover:bg-sf-dark-700 hover:text-sf-text-primary disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-sf-text-secondary'
@@ -1261,17 +1504,19 @@ function Timeline({ onActiveToolChange }) {
   // Snapping hook
   const { snapClipPosition, snapTrim, pixelsPerSecond: snapPixelsPerSecond } = useSnapping()
 
-  // Timeline-wide caption workspace state. We mount CaptionWorkspace at the
-  // timeline level (rather than per-asset in AssetsPanel) so captions can span
-  // the whole edited program. The `virtualTimelineAsset` is a lightweight
-  // stand-in that gives CaptionWorkspace enough shape (id/name/duration) to
-  // render without tying the overlay to any single source clip.
-  const [timelineCaptionWorkspaceAsset, setTimelineCaptionWorkspaceAsset] = useState(null)
+  // Caption workspace state. We mount CaptionWorkspace at the timeline level
+  // so captions can span the whole edited program. The session carries the
+  // workspace input asset (a lightweight stand-in for timeline scope), which
+  // scope to open in, and — for the Edit Captions round-trips — either the
+  // baked overlay clip to replace in place on Generate (replaceClipId, asset
+  // scope) or the live captions clip to seed the workspace from
+  // (seedFromClipId, timeline scope).
+  const [captionWorkspaceSession, setCaptionWorkspaceSession] = useState(null) // { asset, scope, replaceClipId, seedFromClipId }
   const handlePasteAtPlayhead = useCallback(() => {
     if (!activeTrackId || copiedClips.length === 0) return false
-    pasteClipsAtPlayhead(activeTrackId, playheadPosition, assets)
+    pasteClipsAtPlayhead(activeTrackId, getLivePlayhead(), assets)
     return true
-  }, [activeTrackId, assets, copiedClips, pasteClipsAtPlayhead, playheadPosition])
+  }, [activeTrackId, assets, copiedClips, pasteClipsAtPlayhead])
   const assetsById = useMemo(() => {
     const map = new Map()
     assets.forEach((asset) => {
@@ -1287,7 +1532,7 @@ function Timeline({ onActiveToolChange }) {
   // Helper to get clip URL - uses asset store URL if available (handles refreshed blob URLs)
   const getClipUrl = (clip) => {
     if (!clip) return null
-    if (clip.type === 'text' || clip.type === 'shape') return null
+    if (clip.type === 'text' || clip.type === 'shape' || clip.type === 'captions') return null
     // Try to get current URL from assets store (may have been regenerated after refresh)
     if (clip.assetId) {
       const assetUrl = getAssetUrl(clip.assetId)
@@ -1424,7 +1669,7 @@ function Timeline({ onActiveToolChange }) {
     const fallbackVideoTrack = tracks.find(t => t.type === 'video' && !t.locked)
     const targetTrack = activeVideoTrack || fallbackVideoTrack
     if (!targetTrack) return
-    addAdjustmentClip(targetTrack.id, playheadPosition, { duration: 5 })
+    addAdjustmentClip(targetTrack.id, getLivePlayhead(), { duration: 5 })
   }
 
   // Compute program duration (end of latest clip on any enabled track).
@@ -1439,7 +1684,11 @@ function Timeline({ onActiveToolChange }) {
     return end
   }, [clips])
 
-  const handleOpenTimelineCaptions = () => {
+  // options.editClipId: a live captions clip to edit — the workspace seeds
+  // itself from that clip (cues + controls snapshot) instead of its session
+  // stash, and Generate replaces the clip in place.
+  const handleOpenTimelineCaptions = (options = {}) => {
+    const editClipId = options.editClipId || null
     const programDuration = computeProgramDuration()
     if (programDuration <= 0) {
       alert('Add some clips to the timeline before captioning.')
@@ -1451,6 +1700,7 @@ function Timeline({ onActiveToolChange }) {
     // background when nothing video is under the playhead.
     let bgVideoUrl = null
     let bgVideoTime = null
+    const playheadPosition = getLivePlayhead()
     for (const track of tracks.filter((t) => t.type === 'video' && t.enabled !== false)) {
       const clip = clips.find((c) => (
         c.trackId === track.id
@@ -1479,14 +1729,19 @@ function Timeline({ onActiveToolChange }) {
     // track stays put. The replace confirmation now lives at generate time
     // (in CaptionWorkspace), since that's when the old track is actually
     // swapped out inside handlePlaceTimelineCaptionOnTimeline.
-    setTimelineCaptionWorkspaceAsset({
-      id: `timeline-mix-${Date.now()}`,
-      name: 'Timeline',
-      type: 'timeline',
-      duration: programDuration,
-      hasAudio: true,
-      bgVideoUrl,
-      bgVideoTime,
+    setCaptionWorkspaceSession({
+      scope: 'timeline',
+      replaceClipId: null,
+      seedFromClipId: editClipId,
+      asset: {
+        id: `timeline-mix-${Date.now()}`,
+        name: 'Timeline',
+        type: 'timeline',
+        duration: programDuration,
+        hasAudio: true,
+        bgVideoUrl,
+        bgVideoTime,
+      },
     })
   }
 
@@ -1539,6 +1794,132 @@ function Timeline({ onActiveToolChange }) {
       trimEnd: programDuration,
       metadata: { captionScope: 'timeline' },
     })
+  }
+
+  // Edit Captions round-trip: reopen the caption workspace hydrated from the
+  // overlay clip that was right-clicked. Timeline-scope overlays reopen the
+  // timeline workspace (its restore path hydrates cues + style); asset-scope
+  // overlays reopen with their source asset and remember which clip to
+  // replace in place on Generate.
+  const handleEditCaptionsFromClip = (clip) => {
+    setClipContextMenu(null)
+    // Live captions clips carry their own cues + workspace snapshot — reopen
+    // the timeline workspace seeded straight from the clip.
+    if (clip?.type === 'captions') {
+      handleOpenTimelineCaptions({ editClipId: clip.id })
+      return
+    }
+    if (!clip?.assetId) return
+    const overlayAsset = getAssetById(clip.assetId)
+    const overlaySettings = overlayAsset?.settings || {}
+
+    if (overlaySettings.captionScope === 'timeline') {
+      handleOpenTimelineCaptions()
+      return
+    }
+
+    const source = overlaySettings.sourceAssetId ? getAssetById(overlaySettings.sourceAssetId) : null
+    const transcriptPath = source?.settings?.captionTranscriptPath
+      || overlaySettings.captionTranscriptPath
+      || null
+    const workspaceAsset = source
+      ? {
+          ...source,
+          settings: {
+            ...(source.settings || {}),
+            ...(transcriptPath ? { captionTranscriptPath: transcriptPath } : {}),
+          },
+        }
+      : {
+          // Source asset no longer in the project: a stand-in can still
+          // hydrate the cues from the overlay's own sidecar; re-transcribing
+          // just won't be possible.
+          id: overlayAsset?.id || clip.assetId,
+          name: overlayAsset?.name || clip.name || 'Captions',
+          type: 'video',
+          duration: Number(overlayAsset?.duration) || Number(clip.duration) || null,
+          hasAudio: false,
+          settings: transcriptPath ? { captionTranscriptPath: transcriptPath } : {},
+        }
+
+    setCaptionWorkspaceSession({ scope: 'asset', asset: workspaceAsset, replaceClipId: clip.id })
+  }
+
+  // Double-click a captions clip = Edit Captions (the CapCut reflex). Covers
+  // live captions clips (type 'captions') and legacy baked overlays. The
+  // caption check runs inside the handler, not at render time, so the
+  // per-clip render path stays free of asset lookups. Other clip types keep
+  // double-click unbound.
+  const handleClipDoubleClick = (e, clip) => {
+    const isLiveCaptions = clip?.type === 'captions'
+    const clipAsset = !isLiveCaptions && clip?.assetId ? getAssetById(clip.assetId) : null
+    const isCaptionOverlay = isLiveCaptions || Boolean(
+      clipAsset?.settings?.overlayKind === 'captions' || clipAsset?.settings?.captionScope
+    )
+    if (!isCaptionOverlay) return
+    e.preventDefault()
+    e.stopPropagation()
+    handleEditCaptionsFromClip(clip)
+  }
+
+  // Swap a re-generated asset-scope caption overlay into the clip it was
+  // opened from: same track, position, and trims. The superseded overlay
+  // asset is removed once no timeline references it.
+  const handlePlaceAssetCaptionOnTimeline = (captionAsset, replaceClipId) => {
+    if (!captionAsset) return
+    const state = useTimelineStore.getState()
+    const targetClip = replaceClipId ? state.clips.find((c) => c.id === replaceClipId) : null
+
+    if (!targetClip) {
+      // The originating clip vanished mid-edit; place like a fresh overlay
+      // on the captions track without disturbing anything else.
+      let captionsTrack = state.tracks.find((t) => t.role === 'captions')
+      if (!captionsTrack) {
+        captionsTrack = state.addTrack('video', { role: 'captions', name: 'Captions' })
+      }
+      if (!captionsTrack) return
+      const overlayDuration = Math.max(Number(captionAsset.duration) || 0, 1)
+      useTimelineStore.getState().addClip(captionsTrack.id, captionAsset, 0, useTimelineStore.getState().timelineFps, {
+        duration: overlayDuration,
+        trimStart: 0,
+        trimEnd: overlayDuration,
+        metadata: { captionScope: 'asset' },
+      })
+      return
+    }
+
+    state.saveToHistory?.()
+    const oldAssetId = targetClip.assetId
+    const newSourceDuration = Number(captionAsset.duration) || targetClip.sourceDuration
+    useTimelineStore.setState((currentState) => ({
+      clips: (currentState.clips || []).map((c) => (
+        c.id !== targetClip.id ? c : {
+          ...c,
+          assetId: captionAsset.id,
+          name: captionAsset.name,
+          url: captionAsset.url,
+          thumbnail: captionAsset.url,
+          sourceDuration: newSourceDuration,
+          trimEnd: Math.min(Number(c.trimEnd) || newSourceDuration, newSourceDuration),
+          cacheStatus: c.cacheStatus === 'cached' ? 'invalid' : c.cacheStatus,
+          cacheProgress: 0,
+          cacheUrl: null,
+          cachePath: null,
+        }
+      )),
+    }))
+
+    if (oldAssetId && oldAssetId !== captionAsset.id) {
+      const stillOnTimeline = useTimelineStore.getState().clips.some((c) => c.assetId === oldAssetId)
+      const projectState = useProjectStore.getState()
+      const usedElsewhere = (projectState.currentProject?.timelines || []).some((timeline) => (
+        timeline.id !== projectState.currentTimelineId
+        && (timeline.clips || []).some((c) => c?.assetId === oldAssetId)
+      ))
+      if (!stillOnTimeline && !usedElsewhere) {
+        try { useAssetsStore.getState().removeAsset(oldAssetId) } catch (_) { /* best-effort cleanup */ }
+      }
+    }
   }
 
   // Resolve-like transition pane preview (left/right clip contributions).
@@ -1637,14 +2018,34 @@ function Timeline({ onActiveToolChange }) {
   // Pixels per second based on zoom
   const pixelsPerSecond = zoom / 5
 
+  // The zoom floor follows the content: never above the classic floor of
+  // 20 (4 px/s), never below what frames the whole timeline — so hour-long
+  // edits can zoom out far enough to see everything. 0.5 is the absolute
+  // floor (~4 hours visible in a typical viewport).
+  const getMinZoom = useCallback(() => {
+    const visibleWidth = timelineRef.current?.clientWidth || 0
+    if (visibleWidth <= 0) return 20
+    let startTime = 0
+    let endTime = duration
+    if (clips.length > 0) {
+      startTime = Math.min(...clips.map(c => c.startTime))
+      endTime = Math.max(...clips.map(c => c.startTime + c.duration))
+    }
+    const timeSpan = Math.max(0.5, endTime - startTime)
+    const fitZoom = (5 * visibleWidth * 0.95) / timeSpan
+    return Math.max(0.5, Math.min(20, fitZoom))
+  }, [clips, duration])
+  const sliderMinZoom = Math.max(1, Math.floor(getMinZoom()))
+
   // Zoom with playhead as pivot so the timeline zooms into/out of the playhead position
   const applyZoomWithPlayheadPivot = useCallback((newZoomValue) => {
-    const clamped = Math.max(20, Math.min(2000, newZoomValue))
+    const clamped = Math.max(getMinZoom(), Math.min(2000, newZoomValue))
     if (clamped === zoom) return
     if (!timelineRef.current) {
       setZoom(clamped)
       return
     }
+    const playheadPosition = getLivePlayhead()
     const scrollLeft = timelineRef.current.scrollLeft
     const playheadViewportX = playheadPosition * pixelsPerSecond - scrollLeft
     setZoom(clamped)
@@ -1656,7 +2057,7 @@ function Timeline({ onActiveToolChange }) {
         el.scrollLeft = Math.max(0, Math.min(newScrollLeft, el.scrollWidth - el.clientWidth))
       }
     })
-  }, [pixelsPerSecond, playheadPosition, setZoom, zoom])
+  }, [getMinZoom, pixelsPerSecond, setZoom, zoom])
 
   // Frame all: fit full timeline or all clips in view
   const handleFrameAll = () => {
@@ -1671,7 +2072,7 @@ function Timeline({ onActiveToolChange }) {
     }
     const timeSpan = Math.max(0.5, endTime - startTime)
     const padding = 0.95
-    const newZoom = Math.max(20, Math.min(2000, (5 * visibleWidth * padding) / timeSpan))
+    const newZoom = Math.max(0.5, Math.min(2000, (5 * visibleWidth * padding) / timeSpan))
     setZoom(newZoom)
     const newPixelsPerSecond = newZoom / 5
     requestAnimationFrame(() => {
@@ -2139,22 +2540,24 @@ function Timeline({ onActiveToolChange }) {
   }, [marqueeState, clips, tracks, videoTracks, audioTracks, pixelsPerSecond, selectedClipIds, getTimelinePointerPosition])
 
   const selectClipsFromPlayheadToEnd = useCallback(() => {
+    const playheadPosition = getLivePlayhead()
     const clipsToSelect = clips
       .filter(c => (c.startTime + c.duration) > playheadPosition)
       .map(c => c.id)
 
     useTimelineStore.getState().selectClips(clipsToSelect)
     selectMarker(null)
-  }, [clips, playheadPosition, selectMarker])
+  }, [clips, selectMarker])
 
   const selectClipsFromTimelineStartToPlayhead = useCallback(() => {
+    const playheadPosition = getLivePlayhead()
     const clipsToSelect = clips
       .filter(c => c.startTime <= playheadPosition)
       .map(c => c.id)
 
     useTimelineStore.getState().selectClips(clipsToSelect)
     selectMarker(null)
-  }, [clips, playheadPosition, selectMarker])
+  }, [clips, selectMarker])
 
   const closeMoveOffsetDialog = useCallback(() => {
     setMoveOffsetDialogOpen(false)
@@ -2390,6 +2793,7 @@ function Timeline({ onActiveToolChange }) {
         ...(clip.textProperties || {}),
         duration: remainder,
         enabled: isClipEnabled(clip),
+        effects: clip.effects,
         saveHistory: false,
       }
       return addTextClip(clip.trackId, textOptions, splitPosition)
@@ -2402,6 +2806,7 @@ function Timeline({ onActiveToolChange }) {
         name: clip.name,
         transform: clip.transform || {},
         enabled: isClipEnabled(clip),
+        effects: clip.effects,
         saveHistory: false,
       }, splitPosition)
     }
@@ -2413,6 +2818,7 @@ function Timeline({ onActiveToolChange }) {
         adjustments: clip.adjustments || {},
         transform: clip.transform || {},
         enabled: isClipEnabled(clip),
+        effects: clip.effects,
         saveHistory: false,
       })
     }
@@ -2426,6 +2832,8 @@ function Timeline({ onActiveToolChange }) {
       trimStart: sourceTimeAtCut,
       trimEnd: sourceTrimEnd,
       enabled: isClipEnabled(clip),
+      transform: clip.transform,
+      effects: clip.effects,
       ...(clip.type === 'audio'
         ? {
             gainDb: clip.gainDb,
@@ -2436,6 +2844,7 @@ function Timeline({ onActiveToolChange }) {
   }, [assets, saveToHistory, resizeClip, addTextClip, addShapeClip, addAdjustmentClip, addClip, timelineFps, isClipEnabled])
 
   const splitAllTracksAtPlayhead = useCallback(() => {
+    const playheadPosition = getLivePlayhead()
     const clipsToSplit = clips.filter(
       c => playheadPosition > c.startTime && playheadPosition < c.startTime + c.duration
     )
@@ -2456,13 +2865,13 @@ function Timeline({ onActiveToolChange }) {
       useTimelineStore.getState().selectClips(newClipIds)
       selectMarker(null)
     }
-  }, [clips, playheadPosition, saveToHistory, splitClipAtTime, selectMarker])
+  }, [clips, saveToHistory, splitClipAtTime, selectMarker])
 
   const handleSplitClipAtPlayhead = useCallback((clip) => {
     if (!clip) return false
-    splitClipAtTime(clip, playheadPosition, { saveHistory: true })
+    splitClipAtTime(clip, getLivePlayhead(), { saveHistory: true })
     return true
-  }, [playheadPosition, splitClipAtTime])
+  }, [splitClipAtTime])
 
   const handleSplitActiveTrackAtPlayhead = useCallback(() => (
     handleSplitClipAtPlayhead(activeTrackClipAtPlayhead)
@@ -2495,6 +2904,7 @@ function Timeline({ onActiveToolChange }) {
     const epsilon = 0.0001
     let targetTime = null
 
+    const playheadPosition = getLivePlayhead()
     if (direction > 0) {
       targetTime = visibleClipBoundaryTimes.find((time) => time > playheadPosition + epsilon) ?? null
     } else {
@@ -2510,7 +2920,7 @@ function Timeline({ onActiveToolChange }) {
     setPlayheadPosition(targetTime, { snap: true })
     ensureTimelineTimeVisible(targetTime)
     return true
-  }, [ensureTimelineTimeVisible, playheadPosition, setPlayheadPosition, visibleClipBoundaryTimes])
+  }, [ensureTimelineTimeVisible, setPlayheadPosition, visibleClipBoundaryTimes])
 
   const jumpPlayheadToMarker = useCallback((direction) => {
     if (!Number.isFinite(direction) || direction === 0 || markerNavigationTargets.length === 0) return false
@@ -2518,6 +2928,7 @@ function Timeline({ onActiveToolChange }) {
     const epsilon = 0.0001
     let targetMarker = null
 
+    const playheadPosition = getLivePlayhead()
     if (direction > 0) {
       targetMarker = markerNavigationTargets.find((marker) => marker.time > playheadPosition + epsilon) ?? null
     } else {
@@ -2534,7 +2945,7 @@ function Timeline({ onActiveToolChange }) {
     ensureTimelineTimeVisible(targetMarker.time)
     selectMarker(targetMarker.id)
     return true
-  }, [ensureTimelineTimeVisible, markerNavigationTargets, playheadPosition, selectMarker, setPlayheadPosition])
+  }, [ensureTimelineTimeVisible, markerNavigationTargets, selectMarker, setPlayheadPosition])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -2680,7 +3091,25 @@ function Timeline({ onActiveToolChange }) {
 
       if (matchEditorHotkey(e, editorHotkeys[EDITOR_HOTKEY_IDS.ADD_MARKER])) {
         e.preventDefault()
-        addMarker(playheadPosition)
+        addMarker(getLivePlayhead())
+        return
+      }
+
+      if (matchEditorHotkey(e, editorHotkeys[EDITOR_HOTKEY_IDS.MATCH_FRAME])) {
+        const matchClip = resolveMatchFrameClip()
+        if (matchClip) {
+          e.preventDefault()
+          openMatchFrameForClip(matchClip)
+        }
+        return
+      }
+
+      if (matchEditorHotkey(e, editorHotkeys[EDITOR_HOTKEY_IDS.REVEAL_IN_ASSETS])) {
+        const revealClip = resolveTargetedClip((clip) => Boolean(clip && clip.assetId))
+        if (revealClip) {
+          e.preventDefault()
+          revealClipInAssetsPanel(revealClip)
+        }
         return
       }
 
@@ -2775,7 +3204,7 @@ function Timeline({ onActiveToolChange }) {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [toggleSnapping, toggleRippleEdit, addMarker, selectedClipIds, selectedGap, selectedTransitionId, selectedMarkerId, removeSelectedClips, rippleDeleteSelectedClips, rippleDeleteSelectedGap, removeTransition, removeMarker, clearSelection, selectMarker, clips, handleUndoAction, handleRedoAction, activeTrackId, playheadPosition, saveToHistory, resizeClip, addClip, addTextClip, addShapeClip, addTextClipAtPlayhead, addShapeClipAtPlayhead, addAdjustmentClip, updateClipTrim, assets, timelineFps, copySelectedClips, pasteClipsAtPlayhead, copiedClips, selectClipsFromPlayheadToEnd, selectClipsFromTimelineStartToPlayhead, splitClipAtTime, splitAllTracksAtPlayhead, openMoveOffsetDialog, openDurationDeltaDialog, moveOffsetDialogOpen, durationDeltaDialogOpen, editorHotkeys, linkSelectedClips, unlinkSelectedClips, lockSyncClips, unlockSyncLockedClips, toggleClipSelectionEnabled, applyZoomWithPlayheadPivot, zoom, rippleEditMode, activeTrackClipAtPlayhead, canDeleteCurrentSelection, handleCopySelection, handleDeleteCurrentSelection, handlePasteAtPlayhead, handleSplitActiveTrackAtPlayhead, jumpPlayheadToClipBoundary, jumpPlayheadToMarker, clipContextSyncEligibleClips, clipContextSyncLockByClipId, clipContextAllSyncLocked])
+  }, [toggleSnapping, toggleRippleEdit, addMarker, selectedClipIds, selectedGap, selectedTransitionId, selectedMarkerId, removeSelectedClips, rippleDeleteSelectedClips, rippleDeleteSelectedGap, removeTransition, removeMarker, clearSelection, selectMarker, clips, handleUndoAction, handleRedoAction, activeTrackId, saveToHistory, resizeClip, addClip, addTextClip, addShapeClip, addTextClipAtPlayhead, addShapeClipAtPlayhead, addAdjustmentClip, updateClipTrim, assets, timelineFps, copySelectedClips, pasteClipsAtPlayhead, copiedClips, selectClipsFromPlayheadToEnd, selectClipsFromTimelineStartToPlayhead, splitClipAtTime, splitAllTracksAtPlayhead, openMoveOffsetDialog, openDurationDeltaDialog, moveOffsetDialogOpen, durationDeltaDialogOpen, editorHotkeys, linkSelectedClips, unlinkSelectedClips, lockSyncClips, unlockSyncLockedClips, toggleClipSelectionEnabled, applyZoomWithPlayheadPivot, zoom, rippleEditMode, activeTrackClipAtPlayhead, canDeleteCurrentSelection, handleCopySelection, handleDeleteCurrentSelection, handlePasteAtPlayhead, handleSplitActiveTrackAtPlayhead, jumpPlayheadToClipBoundary, jumpPlayheadToMarker, clipContextSyncEligibleClips, clipContextSyncLockByClipId, clipContextAllSyncLocked])
 
   // Spacebar panning key state (dedicated listeners so keyup cannot get "stuck")
   useEffect(() => {
@@ -2922,7 +3351,7 @@ function Timeline({ onActiveToolChange }) {
       const timeAtMouse = (mouseX + scrollLeft) / pixelsPerSecond
       
       // Apply zoom
-      const newZoom = Math.max(20, Math.min(2000, zoom + zoomDelta))
+      const newZoom = Math.max(getMinZoom(), Math.min(2000, zoom + zoomDelta))
       setZoom(newZoom)
       
       // Calculate new pixels per second
@@ -2947,7 +3376,7 @@ function Timeline({ onActiveToolChange }) {
         : e.deltaY
       timelineRef.current.scrollLeft += horizontalDelta
     }
-  }, [pixelsPerSecond, zoom, setZoom])
+  }, [getMinZoom, pixelsPerSecond, zoom, setZoom])
 
   useEffect(() => {
     const timelineEl = timelineRef.current
@@ -2964,11 +3393,66 @@ function Timeline({ onActiveToolChange }) {
     }
   }, [handleWheel])
 
+  // Per-tick playhead updates bypass React entirely: a direct store
+  // subscription moves the playhead element and keeps it in view. This (plus
+  // the omission of playheadPosition from the store slice) is what keeps the
+  // clip area from re-rendering 24+ times a second during playback.
   useEffect(() => {
-    if (!timelineRef.current || !timelineIsPlaying) return
+    const applyPlayheadLeft = (position) => {
+      const node = playheadElRef.current
+      if (node) node.style.left = `${position * pixelsPerSecond}px`
+    }
+    applyPlayheadLeft(useTimelineStore.getState().playheadPosition)
 
-    ensureTimelineTimeVisible(playheadPosition)
-  }, [ensureTimelineTimeVisible, playheadPosition, timelineIsPlaying])
+    // The keep-in-view check must not read layout per tick: the style.left
+    // write above plus a scrollLeft/clientWidth read is a forced synchronous
+    // reflow of the whole clip area — at hundreds of clips that read was the
+    // single biggest per-frame cost during playback. Viewport metrics are
+    // cached (scroll listener + ResizeObserver) so the hot path is pure
+    // arithmetic; layout is only touched when an auto-scroll jump fires.
+    const el = timelineRef.current
+    let cachedScrollLeft = el ? el.scrollLeft : 0
+    let cachedClientWidth = el ? el.clientWidth : 0
+    const handleScroll = () => { cachedScrollLeft = el.scrollLeft }
+    let resizeObserver = null
+    if (el) {
+      el.addEventListener('scroll', handleScroll, { passive: true })
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => { cachedClientWidth = el.clientWidth })
+        resizeObserver.observe(el)
+      }
+    }
+
+    const followPlayhead = (time) => {
+      if (!el || !Number.isFinite(Number(time))) return
+      const targetX = Number(time) * pixelsPerSecond
+      const padding = Math.max(80, cachedClientWidth * 0.18)
+      if (targetX > cachedScrollLeft + cachedClientWidth - padding) {
+        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
+        const next = Math.min(Math.max(0, targetX - (cachedClientWidth * 0.35)), maxScrollLeft)
+        el.scrollLeft = next
+        cachedScrollLeft = next
+      } else if (targetX < cachedScrollLeft + padding) {
+        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
+        const next = Math.max(0, Math.min(targetX - padding, maxScrollLeft))
+        el.scrollLeft = next
+        cachedScrollLeft = next
+      }
+    }
+
+    const unsubscribe = useTimelineStore.subscribe((state, prevState) => {
+      if (state.playheadPosition === prevState.playheadPosition) return
+      applyPlayheadLeft(state.playheadPosition)
+      if (state.isPlaying) {
+        followPlayhead(state.playheadPosition)
+      }
+    })
+    return () => {
+      unsubscribe()
+      if (el) el.removeEventListener('scroll', handleScroll)
+      if (resizeObserver) resizeObserver.disconnect()
+    }
+  }, [pixelsPerSecond])
 
   const getDraggedAssetIds = (dataTransfer) => {
     if (Array.isArray(draggedAssetIds) && draggedAssetIds.length > 0) return draggedAssetIds
@@ -3326,6 +3810,10 @@ function Timeline({ onActiveToolChange }) {
       if (assetIsPlaying) {
         setAssetIsPlaying(false)
       }
+      // Tell the assets panel to release its selection and focus: after a
+      // drop it still owns both, which hijacks the next Delete press into
+      // "delete asset?" instead of deleting the just-placed clip.
+      try { window.dispatchEvent(new Event('vidwright-timeline-assets-dropped')) } catch (_) { /* non-browser */ }
     }
   }
 
@@ -3487,7 +3975,7 @@ function Timeline({ onActiveToolChange }) {
       case 'duplicate':
         // Duplicate clip right after current position
         if (clip.type === 'text') {
-          const textOptions = { ...(clip.textProperties || {}), duration: clip.duration, enabled: isClipEnabled(clip) }
+          const textOptions = { ...(clip.textProperties || {}), duration: clip.duration, enabled: isClipEnabled(clip), effects: clip.effects }
           addTextClip(clip.trackId, textOptions, clip.startTime + clip.duration + 0.1)
         } else if (clip.type === 'shape') {
           addShapeClip(clip.trackId, {
@@ -3496,6 +3984,7 @@ function Timeline({ onActiveToolChange }) {
             name: clip.name,
             transform: clip.transform || {},
             enabled: isClipEnabled(clip),
+            effects: clip.effects,
           }, clip.startTime + clip.duration + 0.1)
         } else if (clip.type === 'adjustment') {
           addAdjustmentClip(clip.trackId, clip.startTime + clip.duration + 0.1, {
@@ -3504,12 +3993,18 @@ function Timeline({ onActiveToolChange }) {
             adjustments: clip.adjustments || {},
             transform: clip.transform || {},
             enabled: isClipEnabled(clip),
+            effects: clip.effects,
           })
         } else {
           const asset = assets.find(a => a.id === clip.assetId)
           if (asset) {
             addClip(clip.trackId, asset, clip.startTime + clip.duration + 0.1, timelineFps, {
+              duration: clip.duration,
+              trimStart: clip.trimStart,
+              trimEnd: clip.trimEnd,
               enabled: isClipEnabled(clip),
+              transform: clip.transform,
+              effects: clip.effects,
               ...(clip.type === 'audio'
                 ? {
                     gainDb: clip.gainDb,
@@ -3888,8 +4383,9 @@ function Timeline({ onActiveToolChange }) {
     }
 
     const sourceDuration = getSourceDuration(clip)
+    // Alt while dragging is the duplicate gesture, so slip only engages via the Slip tool.
     const canSlip = !isSyncLockedClip(clip)
-      && (isSlipToolActive || e.altKey)
+      && isSlipToolActive
       && (clip.type === 'video' || clip.type === 'audio')
       && Number.isFinite(sourceDuration)
     if (canSlip) {
@@ -3963,7 +4459,7 @@ function Timeline({ onActiveToolChange }) {
     }
   }
 
-  // Handle slip edit (Alt+drag on clip body)
+  // Handle slip edit (Slip tool drag on clip body)
   useEffect(() => {
     if (!slipState || trimState) return
 
@@ -4003,7 +4499,30 @@ function Timeline({ onActiveToolChange }) {
   // Supports moving multiple selected clips together
   useEffect(() => {
     if (!clipDragState || trimState || slipState) return
-    
+
+    const movingClipIdsForGesture = clipDragState.movingClipIds || clipDragState.originalPositions.map(({ id }) => id)
+
+    // Alt-drag duplicate (Flame/Resolve style): while Alt is held the dragged
+    // originals keep following the pointer and spawned copies hold the
+    // gesture-start spots. Alt can engage or disengage at any point before
+    // mouse-up; the spawn waits for the drag threshold (history saved) so a
+    // plain Alt+click never duplicates. The ref is written before state so a
+    // mousemove landing between the two can't double-spawn.
+    const syncAltDuplicate = (altHeld) => {
+      if (altHeld) {
+        if (dragDuplicatesRef.current || !clipDragHistorySavedRef.current) return
+        const created = duplicateClipsForDrag(movingClipIdsForGesture, clipDragState.originalPositions)
+        if (created) {
+          dragDuplicatesRef.current = created
+          setClipDragState(prev => (prev ? { ...prev, isDuplicating: true } : prev))
+        }
+      } else if (dragDuplicatesRef.current) {
+        removeDragDuplicates(dragDuplicatesRef.current)
+        dragDuplicatesRef.current = null
+        setClipDragState(prev => (prev ? { ...prev, isDuplicating: false } : prev))
+      }
+    }
+
     const handleMouseMove = (e) => {
       const deltaX = e.clientX - clipDragState.startX
       const deltaY = e.clientY - clipDragState.startY
@@ -4021,7 +4540,9 @@ function Timeline({ onActiveToolChange }) {
         saveToHistory()
         clipDragHistorySavedRef.current = true
       }
-      
+
+      syncAltDuplicate(e.altKey)
+
       setClipDragState(prev => ({ ...prev, hasMoved: true }))
       
       const clip = clips.find(c => c.id === clipDragState.clipId)
@@ -4084,6 +4605,12 @@ function Timeline({ onActiveToolChange }) {
         } else {
           const hoveredTrackId = getHoveredTrackIdForFamily(relativeY, getClipTrackFamily(clip))
           if (hoveredTrackId) newTrackId = hoveredTrackId
+          // The duplicate path below bypasses moveClip, so mirror its
+          // captions-track refusal here: non-caption clips stay on their track.
+          if (dragDuplicatesRef.current && newTrackId !== clip.trackId) {
+            const destTrack = tracks.find(t => t.id === newTrackId)
+            if (isCaptionsTrack(destTrack) && !isCaptionClip(clip)) newTrackId = clip.trackId
+          }
         }
       }
       
@@ -4114,8 +4641,14 @@ function Timeline({ onActiveToolChange }) {
           pendingAutoCreateVideoTrack,
         }))
       } else {
-        // Move single clip (no overlap resolution yet)
-        moveClip(clipDragState.clipId, newTrackId, proposedStartTime, false)
+        if (dragDuplicatesRef.current) {
+          // The duplicate gesture never ripples: moveClip's live ripple would
+          // treat the just-spawned copy as a downstream clip and drag it along.
+          setSelectedClipPositions([{ id: clipDragState.clipId, startTime: proposedStartTime, trackId: newTrackId }], [clipDragState.clipId])
+        } else {
+          // Move single clip (no overlap resolution yet)
+          moveClip(clipDragState.clipId, newTrackId, proposedStartTime, false)
+        }
         setClipDragState(prev => ({
           ...prev,
           currentTrackId: newTrackId,
@@ -4197,20 +4730,48 @@ function Timeline({ onActiveToolChange }) {
       } finally {
         setClipDragState(null)
         clipDragHistorySavedRef.current = false
+        dragDuplicatesRef.current = null // any Alt-drag copies stay put — that IS the committed duplicate
         clearActiveSnap()
       }
     }
-    
+
+    // Alt can flip while the mouse is still, so track the key directly too.
+    // preventDefault keeps Alt from focusing the app menu mid-gesture.
+    const handleDragKeyDown = (e) => {
+      if (e.key === 'Alt') {
+        e.preventDefault()
+        syncAltDuplicate(true)
+      }
+    }
+    const handleDragKeyUp = (e) => {
+      if (e.key === 'Alt') {
+        e.preventDefault()
+        syncAltDuplicate(false)
+      }
+    }
+    // Focus loss (e.g. Alt+Tab) is not a deliberate drop: withdraw any
+    // Alt-drag copies, then commit the move like before.
+    const handleWindowBlur = () => {
+      syncAltDuplicate(false)
+      handleMouseUp()
+    }
+
     window.addEventListener('mousemove', handleMouseMove)
     window.addEventListener('mouseup', handleMouseUp)
-    window.addEventListener('blur', handleMouseUp)
-    
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('keydown', handleDragKeyDown)
+    window.addEventListener('keyup', handleDragKeyUp)
+    if (clipDragState.isDuplicating) document.body.style.cursor = 'copy'
+
     return () => {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
-      window.removeEventListener('blur', handleMouseUp)
+      window.removeEventListener('blur', handleWindowBlur)
+      window.removeEventListener('keydown', handleDragKeyDown)
+      window.removeEventListener('keyup', handleDragKeyUp)
+      if (clipDragState.isDuplicating) document.body.style.cursor = ''
     }
-  }, [clipDragState, trimState, slipState, clips, pixelsPerSecond, moveClip, moveSelectedClips, setSelectedClipPositions, selectedClipIds, snapClipPosition, setActiveSnapTime, clearActiveSnap, saveToHistory, addTrack, getClipTrackFamily, getHoveredTrackIdForFamily, getResolvedGroupTrackDelta, getTracksForFamily, videoTracks])
+  }, [clipDragState, trimState, slipState, clips, tracks, pixelsPerSecond, moveClip, moveSelectedClips, setSelectedClipPositions, duplicateClipsForDrag, removeDragDuplicates, selectedClipIds, snapClipPosition, setActiveSnapTime, clearActiveSnap, saveToHistory, addTrack, getClipTrackFamily, getHoveredTrackIdForFamily, getResolvedGroupTrackDelta, getTracksForFamily, videoTracks])
 
   // Handle adding transition between adjacent clips - show type menu
   const handleAddTransition = (e, clipA, clipB) => {
@@ -4591,7 +5152,7 @@ function Timeline({ onActiveToolChange }) {
 
   const getMajorRulerStep = (pixelsPerSec) => {
     // Keep labels readable while allowing finer granularity at high zoom.
-    const candidates = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+    const candidates = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
     const minSpacingPx = 95
     return candidates.find(step => step * pixelsPerSec >= minSpacingPx) || candidates[candidates.length - 1]
   }
@@ -4637,7 +5198,7 @@ function Timeline({ onActiveToolChange }) {
       )}
       {/* Timeline Header - compact editor toolbar and zoom controls */}
       <div className="h-8 bg-sf-dark-800 border-b border-sf-dark-700 flex items-center px-2 gap-2 overflow-hidden">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
+        <div ref={toolbarScrollRef} className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
           <div className={toolbarSectionClass} aria-label="Add tracks">
             <button
               onClick={() => addTrack('video')}
@@ -4645,7 +5206,7 @@ function Timeline({ onActiveToolChange }) {
               title="Add video track"
             >
               <Plus className="w-3 h-3" />
-              Video
+              {showToolbarLabels && 'Video'}
             </button>
             <button
               onClick={() => addTrack('audio', { channels: 'mono' })}
@@ -4653,7 +5214,7 @@ function Timeline({ onActiveToolChange }) {
               title="Add mono audio track"
             >
               <Plus className="w-3 h-3" />
-              Mono
+              {showToolbarLabels && 'Mono'}
             </button>
             <button
               onClick={() => addTrack('audio', { channels: 'stereo' })}
@@ -4661,18 +5222,18 @@ function Timeline({ onActiveToolChange }) {
               title="Add stereo audio track"
             >
               <Plus className="w-3 h-3" />
-              Stereo
+              {showToolbarLabels && 'Stereo'}
             </button>
           </div>
 
           <div className={toolbarSectionClass} aria-label="Insert timeline items">
             <button
-              onClick={() => addMarker(playheadPosition)}
+              onClick={() => addMarker(getLivePlayhead())}
               className={toolbarButtonClass}
               title={`Add timeline marker at playhead (${markerHotkeyLabel})`}
             >
               <Flag className="w-3 h-3 text-yellow-400" />
-              Marker
+              {showToolbarLabels && 'Marker'}
             </button>
             <button
               onClick={handleAddAdjustmentLayer}
@@ -4680,7 +5241,7 @@ function Timeline({ onActiveToolChange }) {
               title="Add adjustment layer on active video track"
             >
               <Square className="w-3 h-3 text-purple-400" />
-              Adj
+              {showToolbarLabels && 'Adj'}
             </button>
             <button
               onClick={() => addTextClipAtPlayhead()}
@@ -4691,7 +5252,7 @@ function Timeline({ onActiveToolChange }) {
                 : `Add a video track to create text at the playhead (${addTextClipHotkeyLabel})`}
             >
               <Type className="w-3 h-3" />
-              Text
+              {showToolbarLabels && 'Text'}
             </button>
             <button
               onClick={() => addShapeClipAtPlayhead()}
@@ -4702,15 +5263,15 @@ function Timeline({ onActiveToolChange }) {
                 : 'Add a video track to create shapes at the playhead'}
             >
               <Square className="w-3 h-3 text-cyan-300" />
-              Shape
+              {showToolbarLabels && 'Shape'}
             </button>
             <button
-              onClick={handleOpenTimelineCaptions}
+              onClick={() => handleOpenTimelineCaptions()}
               className={toolbarButtonClass}
               title="Transcribe the timeline's audio and add animated captions on a new top track"
             >
               <Type className="w-3 h-3 text-cyan-300" />
-              Captions
+              {showToolbarLabels && 'Captions'}
             </button>
             {selectedMarkerId && (
               <button
@@ -4730,7 +5291,7 @@ function Timeline({ onActiveToolChange }) {
               title={`Split all clips at the playhead across every track (${splitAllHotkeyLabel})`}
             >
               <Scissors className="w-3 h-3" />
-              Cut All
+              {showToolbarLabels && 'Cut All'}
             </button>
             <button
               onClick={handleSplitActiveTrackAtPlayhead}
@@ -4741,7 +5302,7 @@ function Timeline({ onActiveToolChange }) {
                 : `Set an active track and park the playhead over a clip to split it (${splitActiveHotkeyLabel})`}
             >
               <Scissors className="w-3 h-3" />
-              Split
+              {showToolbarLabels && 'Split'}
             </button>
             <button
               onClick={handleCopySelection}
@@ -4750,7 +5311,7 @@ function Timeline({ onActiveToolChange }) {
               title={`Copy the selected clips (${copyHotkeyLabel})`}
             >
               <Copy className="w-3 h-3" />
-              Copy
+              {showToolbarLabels && 'Copy'}
             </button>
             <button
               onClick={handlePasteAtPlayhead}
@@ -4761,7 +5322,7 @@ function Timeline({ onActiveToolChange }) {
                 : `Copy clips first, then choose an active track to paste at the playhead (${pasteHotkeyLabel})`}
             >
               <ClipboardPaste className="w-3 h-3" />
-              Paste
+              {showToolbarLabels && 'Paste'}
             </button>
             <button
               onClick={() => toggleClipSelectionEnabled()}
@@ -4772,7 +5333,7 @@ function Timeline({ onActiveToolChange }) {
                 : `Select clips to enable or disable them (${toggleClipEnabledHotkeyLabel})`}
             >
               {selectedClipsShouldEnable ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-              {selectedClipsShouldEnable ? 'Enable' : 'Disable'}
+              {showToolbarLabels && (selectedClipsShouldEnable ? 'Enable' : 'Disable')}
             </button>
             <button
               onClick={() => { void handleRenderClips(renderableSelectedClips) }}
@@ -4783,7 +5344,7 @@ function Timeline({ onActiveToolChange }) {
                 : 'Select clips to render them to cache'}
             >
               <Zap className="w-3 h-3" />
-              Render
+              {showToolbarLabels && 'Render'}
             </button>
             <button
               onClick={handleDeleteCurrentSelection}
@@ -4802,7 +5363,7 @@ function Timeline({ onActiveToolChange }) {
               }
             >
               <Trash2 className="w-3 h-3" />
-              Delete
+              {showToolbarLabels && 'Delete'}
             </button>
           </div>
 
@@ -4820,7 +5381,7 @@ function Timeline({ onActiveToolChange }) {
                   aria-pressed={active}
                 >
                   <Icon className="w-3 h-3" />
-                  {tool.label}
+                  {showToolbarLabels && tool.label}
                 </button>
               )
             })}
@@ -4833,33 +5394,38 @@ function Timeline({ onActiveToolChange }) {
               title={`Snapping ${snappingEnabled ? 'ON' : 'OFF'} (${snappingHotkeyLabel} to toggle)`}
             >
               <Magnet className="w-3 h-3" />
-              Snap
+              {showToolbarLabels && 'Snap'}
             </button>
-            <button
-              onClick={toggleRippleEdit}
-              className={toolbarToggleClass(rippleEditMode)}
-              title={`Ripple Edit ${rippleEditMode ? 'ON' : 'OFF'} (${rippleHotkeyLabel} to toggle) - Moving clips shifts subsequent clips`}
-            >
-              <ArrowRightLeft className="w-3 h-3" />
-              Ripple
-            </button>
-            <button
-              onClick={(event) => {
-                if (isMusicPopoverOpen) {
-                  setIsMusicPopoverOpen(false)
-                } else {
-                  setMusicPopoverAnchor(event.currentTarget.getBoundingClientRect())
-                  setIsMusicPopoverOpen(true)
-                }
-              }}
-              className={toolbarToggleClass(isMusicPopoverOpen)}
-              title="Generate music with ACE-Step — duration prefills from the in/out range"
-            >
-              <MusicIcon className="w-3 h-3" />
-              Music
-            </button>
+            {toolbarTier !== 'overflow' && (
+              <button
+                onClick={toggleRippleEdit}
+                className={toolbarToggleClass(rippleEditMode)}
+                title={`Ripple Edit ${rippleEditMode ? 'ON' : 'OFF'} (${rippleHotkeyLabel} to toggle) - Moving clips shifts subsequent clips`}
+              >
+                <ArrowRightLeft className="w-3 h-3" />
+                {showToolbarLabels && 'Ripple'}
+              </button>
+            )}
+            {toolbarTier !== 'overflow' && (
+              <button
+                onClick={(event) => {
+                  if (isMusicPopoverOpen) {
+                    setIsMusicPopoverOpen(false)
+                  } else {
+                    setMusicPopoverAnchor(event.currentTarget.getBoundingClientRect())
+                    setIsMusicPopoverOpen(true)
+                  }
+                }}
+                className={toolbarToggleClass(isMusicPopoverOpen)}
+                title="Generate music with ACE-Step — duration prefills from the in/out range"
+              >
+                <MusicIcon className="w-3 h-3" />
+                {showToolbarLabels && 'Music'}
+              </button>
+            )}
           </div>
 
+          {toolbarTier !== 'overflow' && (
           <div className={toolbarSectionClass} aria-label="Select timeline ranges">
             <button
               onClick={selectClipsFromTimelineStartToPlayhead}
@@ -4867,7 +5433,7 @@ function Timeline({ onActiveToolChange }) {
               title={`Select clips from the start of the timeline to the playhead (${selectFromStartHotkeyLabel})`}
             >
               <ChevronLeft className="w-3 h-3" />
-              From Start
+              {showToolbarLabels && 'From Start'}
             </button>
             <button
               onClick={selectClipsFromPlayheadToEnd}
@@ -4875,7 +5441,7 @@ function Timeline({ onActiveToolChange }) {
               title={`Select clips from the playhead to the end of the timeline (${selectToEndHotkeyLabel})`}
             >
               <ChevronRight className="w-3 h-3" />
-              To End
+              {showToolbarLabels && 'To End'}
             </button>
             {selectedClipIds.length > 0 && (
               <button
@@ -4884,7 +5450,7 @@ function Timeline({ onActiveToolChange }) {
                 title={`Move selected clips by an exact signed timecode offset (${moveByHotkeyLabel})`}
               >
                 <ArrowRightLeft className="w-3 h-3" />
-                Move By
+                {showToolbarLabels && 'Move By'}
               </button>
             )}
             {selectedClipIds.length > 0 && (
@@ -4894,29 +5460,95 @@ function Timeline({ onActiveToolChange }) {
                 title={`Change selected clip duration by an exact signed amount${durationByHotkeyHint ? ` (${durationByHotkeyHint})` : ''}`}
               >
                 <Clock className="w-3 h-3" />
-                Duration By
+                {showToolbarLabels && 'Duration By'}
               </button>
             )}
           </div>
-
-          <div className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-sf-dark-700/70 bg-sf-dark-900/45 px-1.5">
-            {selectedClipIds.length > 1 && (
-              <span className="text-[10px] text-sf-accent">{selectedClipIds.length} selected</span>
-            )}
-            {selectedGap && (
-              <span
-                className="text-[10px] text-sf-accent"
-                title={`Selected gap from ${formatTimelineTimecode(selectedGap.startTime)} to ${formatTimelineTimecode(selectedGap.endTime)}`}
-              >
-                Gap {Math.max(0, selectedGap.endTime - selectedGap.startTime).toFixed(2)}s
-              </span>
-            )}
-            <span className="text-[10px] text-sf-text-muted">{clips.length} clips</span>
-          </div>
+          )}
         </div>
 
         {/* Info & Zoom */}
         <div className="flex shrink-0 items-center gap-2">
+          {toolbarTier === 'overflow' && (
+            <>
+              <button
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  setToolbarOverflowAnchor(event.currentTarget.getBoundingClientRect())
+                  setToolbarOverflowOpen((open) => !open)
+                }}
+                className={toolbarToggleClass(toolbarOverflowOpen)}
+                title="More tools"
+              >
+                <MoreHorizontal className="w-3.5 h-3.5" />
+              </button>
+              {toolbarOverflowOpen && toolbarOverflowAnchor && (
+                <div
+                  onMouseDown={(event) => event.stopPropagation()}
+                  className="fixed z-50 w-48 rounded-md border border-sf-dark-600 bg-sf-dark-800 p-1 shadow-2xl shadow-black/50 flex flex-col gap-0.5"
+                  style={{
+                    top: toolbarOverflowAnchor.bottom + 4,
+                    right: Math.max(8, window.innerWidth - toolbarOverflowAnchor.right),
+                  }}
+                >
+                  <button
+                    onClick={() => { toggleRippleEdit(); setToolbarOverflowOpen(false) }}
+                    className={overflowMenuItemClass}
+                    title={`Ripple Edit (${rippleHotkeyLabel} to toggle)`}
+                  >
+                    <ArrowRightLeft className="w-3 h-3" />
+                    Ripple Edit {rippleEditMode ? '· ON' : ''}
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      setMusicPopoverAnchor(event.currentTarget.getBoundingClientRect())
+                      setIsMusicPopoverOpen(true)
+                      setToolbarOverflowOpen(false)
+                    }}
+                    className={overflowMenuItemClass}
+                    title="Generate music with ACE-Step"
+                  >
+                    <MusicIcon className="w-3 h-3" />
+                    Generate Music
+                  </button>
+                  <button
+                    onClick={() => { selectClipsFromTimelineStartToPlayhead(); setToolbarOverflowOpen(false) }}
+                    className={overflowMenuItemClass}
+                    title={`Select clips from the timeline start to the playhead (${selectFromStartHotkeyLabel})`}
+                  >
+                    <ChevronLeft className="w-3 h-3" />
+                    Select From Start
+                  </button>
+                  <button
+                    onClick={() => { selectClipsFromPlayheadToEnd(); setToolbarOverflowOpen(false) }}
+                    className={overflowMenuItemClass}
+                    title={`Select clips from the playhead to the end (${selectToEndHotkeyLabel})`}
+                  >
+                    <ChevronRight className="w-3 h-3" />
+                    Select To End
+                  </button>
+                  <button
+                    onClick={() => { openMoveOffsetDialog(); setToolbarOverflowOpen(false) }}
+                    disabled={selectedClipIds.length === 0}
+                    className={overflowMenuItemClass}
+                    title={`Move selected clips by an exact offset (${moveByHotkeyLabel})`}
+                  >
+                    <ArrowRightLeft className="w-3 h-3" />
+                    Move By…
+                  </button>
+                  <button
+                    onClick={() => { openDurationDeltaDialog(); setToolbarOverflowOpen(false) }}
+                    disabled={selectedClipIds.length === 0}
+                    className={overflowMenuItemClass}
+                    title="Change selected clip duration by an exact amount"
+                  >
+                    <Clock className="w-3 h-3" />
+                    Duration By…
+                  </button>
+                </div>
+              )}
+            </>
+          )}
           <button
             onClick={handleFrameAll}
             className="p-1.5 hover:bg-sf-dark-600 rounded text-sf-text-muted"
@@ -4924,6 +5556,27 @@ function Timeline({ onActiveToolChange }) {
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
+          {/* Track height presets */}
+          <div className="flex items-center gap-0.5 mr-2">
+            {[
+              ['compact', 'S', 'Compact tracks — fit the most tracks on screen'],
+              ['normal', 'M', 'Normal track height'],
+              ['tall', 'L', 'Tall tracks — room for waveforms and keyframes'],
+            ].map(([id, label, tip]) => (
+              <button
+                key={id}
+                onClick={() => applyTrackHeightPreset(id)}
+                title={tip}
+                className={`w-5 h-5 flex items-center justify-center rounded text-[10px] transition-colors ${
+                  trackHeightPreset === id
+                    ? 'bg-sf-accent/20 text-sf-accent border border-sf-accent/40'
+                    : 'text-sf-text-muted hover:bg-sf-dark-600'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => applyZoomWithPlayheadPivot(zoom - 50)}
@@ -4934,7 +5587,7 @@ function Timeline({ onActiveToolChange }) {
             </button>
             <input
               type="range"
-              min="20"
+              min={sliderMinZoom}
               max="2000"
               value={zoom}
               onChange={(e) => applyZoomWithPlayheadPivot(parseInt(e.target.value, 10))}
@@ -5084,12 +5737,26 @@ function Timeline({ onActiveToolChange }) {
                 <button 
                   onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id) }}
                   className="p-0.5 hover:bg-sf-dark-600 rounded"
+                  title={track.visible ? 'Hide video track' : 'Show video track'}
                 >
                   {track.visible ? (
                     <Eye className="w-3 h-3 text-sf-text-muted" />
                   ) : (
                     <EyeOff className="w-3 h-3 text-sf-text-muted opacity-50" />
                   )}
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleTrackSolo(track.id) }}
+                  className={`min-w-[18px] h-[18px] flex items-center justify-center rounded text-[10px] font-bold transition-colors ${
+                    track.solo
+                      ? 'bg-yellow-500/80 text-black'
+                      : 'bg-sf-dark-600 text-sf-text-muted hover:bg-sf-dark-500 hover:text-sf-text-secondary'
+                  }`}
+                  title={track.solo ? 'Unsolo video track' : 'Solo video track (show only soloed video tracks)'}
+                  aria-pressed={track.solo === true}
+                  aria-label={`${track.solo ? 'Unsolo' : 'Solo'} video track ${track.name}`}
+                >
+                  S
                 </button>
                 <button 
                   onClick={(e) => { e.stopPropagation(); toggleTrackLock(track.id) }}
@@ -5252,7 +5919,7 @@ function Timeline({ onActiveToolChange }) {
                 >
                   <Pencil className="w-3 h-3 text-sf-text-muted" />
                 </button>
-                <button 
+                <button
                   onClick={(e) => { e.stopPropagation(); toggleTrackMute(track.id) }}
                   className="p-0.5 hover:bg-sf-dark-600 rounded"
                 >
@@ -5262,7 +5929,23 @@ function Timeline({ onActiveToolChange }) {
                     <Volume2 className="w-3 h-3 text-sf-text-muted" />
                   )}
                 </button>
-                <button 
+                {/* Solo — same track.solo state the Mixer's S button toggles,
+                    so soloing the dialog track for captions never requires
+                    leaving the editor. */}
+                {track.type === 'audio' && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleTrackSolo(track.id) }}
+                    className={`min-w-[18px] h-[18px] flex items-center justify-center rounded text-[10px] font-bold transition-colors ${
+                      track.solo
+                        ? 'bg-yellow-500/80 text-black'
+                        : 'bg-sf-dark-600 text-sf-text-muted hover:bg-sf-dark-500 hover:text-sf-text-secondary'
+                    }`}
+                    title={track.solo ? 'Unsolo track' : 'Solo track (only soloed audio tracks play)'}
+                  >
+                    S
+                  </button>
+                )}
+                <button
                   onClick={(e) => { e.stopPropagation(); toggleTrackLock(track.id) }}
                   className="p-0.5 hover:bg-sf-dark-600 rounded"
                 >
@@ -5334,28 +6017,12 @@ function Timeline({ onActiveToolChange }) {
               }}
               title="Double-click to add marker"
             >
-              {/* Minor ticks */}
-              {rulerTicks.minor.map((time) => (
-                <div
-                  key={`minor-${time}`}
-                  className="absolute bottom-0 w-px h-1.5 bg-sf-dark-600/80 pointer-events-none"
-                  style={{ left: `${time * pixelsPerSecond}px` }}
-                />
-              ))}
-
-              {/* Major ticks + timecode labels */}
-              {rulerTicks.major.map((time) => (
-                <div
-                  key={`major-${time}`}
-                  className="absolute top-0 bottom-0 pointer-events-none"
-                  style={{ left: `${time * pixelsPerSecond}px` }}
-                >
-                  <div className="absolute bottom-0 w-px h-2.5 bg-sf-dark-500/95" />
-                  <span className="absolute top-0.5 left-1 text-[9px] text-sf-text-muted font-mono tracking-tight whitespace-nowrap">
-                    {formatTimelineTimecode(time)}
-                  </span>
-                </div>
-              ))}
+              <RulerTickMarks
+                major={rulerTicks.major}
+                minor={rulerTicks.minor}
+                pixelsPerSecond={pixelsPerSecond}
+                timecodeFps={timecodeFps}
+              />
 
               {/* FPS indicator on far right */}
               <div className="absolute top-0.5 right-1 text-[8px] text-sf-text-muted/80 font-mono pointer-events-none">
@@ -5448,7 +6115,9 @@ function Timeline({ onActiveToolChange }) {
                     data-clip="true"
                     onMouseDown={(e) => handleClipDragStart(e, clip)}
                     onClick={(e) => handleClipClick(e, clip)}
-                    onDoubleClick={isTextClip ? (e) => handleTextClipDoubleClick(e, clip) : undefined}
+                    onDoubleClick={isTextClip
+                      ? (e) => handleTextClipDoubleClick(e, clip)
+                      : (e) => handleClipDoubleClick(e, clip)}
                     onContextMenu={(e) => handleClipContextMenu(e, clip)}
                     onDragOver={(e) => {
                       if (parseEffectDrop(e)) {
@@ -5495,7 +6164,9 @@ function Timeline({ onActiveToolChange }) {
                         slipState?.clipId === clip.id ? 'ring-2 ring-yellow-400 cursor-ew-resize z-30' : ''
                       } ${
                         clipDragState?.movingClipIds?.includes(clip.id)
-                          ? 'ring-2 ring-sf-accent cursor-grabbing z-30' : ''
+                          ? (clipDragState?.isDuplicating
+                            ? 'ring-2 ring-emerald-400 cursor-copy z-30'
+                            : 'ring-2 ring-sf-accent cursor-grabbing z-30') : ''
                       } ${
                         clipEnabled ? '' : 'opacity-60 saturate-0'
                       }`}
@@ -6260,7 +6931,9 @@ function Timeline({ onActiveToolChange }) {
                       className={`absolute top-0 bottom-0 rounded-sm overflow-hidden ${
                         selectedClipIds.includes(clip.id) ? 'ring-2 ring-white ring-offset-1 ring-offset-sf-dark-900' : ''
                       } ${slipState?.clipId === clip.id ? 'ring-2 ring-yellow-400 cursor-ew-resize z-30' : ''} ${clipDragState?.movingClipIds?.includes(clip.id)
-                          ? 'ring-2 ring-sf-accent cursor-grabbing z-30' : ''} ${clipEnabled ? '' : 'opacity-60 saturate-0'}`}
+                          ? (clipDragState?.isDuplicating
+                            ? 'ring-2 ring-emerald-400 cursor-copy z-30'
+                            : 'ring-2 ring-sf-accent cursor-grabbing z-30') : ''} ${clipEnabled ? '' : 'opacity-60 saturate-0'}`}
                       style={{
                         left: `${interactiveClipOffset}px`,
                         width: `${renderedClipWidth}px`,
@@ -6652,10 +7325,12 @@ function Timeline({ onActiveToolChange }) {
             </div>
           )}
           
-          {/* Playhead */}
+          {/* Playhead — positioned imperatively by the store subscription
+              above; the render-time left only covers the first paint. */}
           <div
+            ref={playheadElRef}
             className={`absolute top-0 bottom-0 z-10 ${isScrubbing ? 'pointer-events-none' : ''}`}
-            style={{ left: `${playheadPosition * pixelsPerSecond}px`, width: '2px' }}
+            style={{ left: `${getLivePlayhead() * pixelsPerSecond}px`, width: '2px' }}
           >
             <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] bg-orange-400 shadow-[0_0_12px_rgba(251,146,60,0.45)]" />
             {/* Playhead handle (draggable) */}
@@ -6783,6 +7458,75 @@ function Timeline({ onActiveToolChange }) {
           }}
           onClick={(e) => e.stopPropagation()}
         >
+          {(() => {
+            const contextClip = clips.find(c => c.id === clipContextMenu.clipId)
+            const contextAsset = contextClip?.assetId ? getAssetById(contextClip.assetId) : null
+            if (!contextAsset) return null
+            const canMatchFrame = (contextClip.type === 'video' || contextClip.type === 'audio')
+              && (contextAsset.type === 'video' || contextAsset.type === 'audio')
+            const canRevealOnDisk = canRevealAssetInFileManager(contextAsset)
+            return (
+              <>
+                {canMatchFrame && (
+                  <button
+                    onClick={() => {
+                      openMatchFrameForClip(contextClip)
+                      setClipContextMenu(null)
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
+                  >
+                    <span>Match Frame in Source Player</span>
+                    {matchFrameHotkeyLabel && (
+                      <span className="ml-auto text-sf-text-muted text-[10px]">{matchFrameHotkeyLabel}</span>
+                    )}
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    revealClipInAssetsPanel(contextClip)
+                    setClipContextMenu(null)
+                  }}
+                  className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
+                >
+                  <span>Reveal in Assets Panel</span>
+                  {revealInAssetsHotkeyLabel && (
+                    <span className="ml-auto text-sf-text-muted text-[10px]">{revealInAssetsHotkeyLabel}</span>
+                  )}
+                </button>
+                {canRevealOnDisk && (
+                  <button
+                    onClick={() => {
+                      void revealAssetInFileManager(contextAsset)
+                      setClipContextMenu(null)
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
+                  >
+                    <span>{getRevealInFileManagerLabel()}</span>
+                  </button>
+                )}
+                <div className="h-px bg-sf-dark-600 my-1" />
+              </>
+            )
+          })()}
+          {(() => {
+            const contextClip = clips.find(c => c.id === clipContextMenu.clipId)
+            const contextAsset = contextClip?.assetId ? getAssetById(contextClip.assetId) : null
+            const isCaptionOverlay = contextClip?.type === 'captions' || Boolean(
+              contextAsset?.settings?.overlayKind === 'captions' || contextAsset?.settings?.captionScope
+            )
+            if (!isCaptionOverlay) return null
+            return (
+              <>
+                <button
+                  onClick={() => handleEditCaptionsFromClip(contextClip)}
+                  className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
+                >
+                  <span>Edit Captions…</span>
+                </button>
+                <div className="h-px bg-sf-dark-600 my-1" />
+              </>
+            )
+          })()}
           {(() => {
             const contextClip = clips.find(c => c.id === clipContextMenu.clipId)
             const canUseMask = contextClip?.type === 'video' || contextClip?.type === 'image'
@@ -7057,7 +7801,7 @@ function Timeline({ onActiveToolChange }) {
             <span className="ml-auto text-sf-text-muted text-[10px]">Ctrl+C</span>
           </button>
           <button
-            onClick={() => { pasteClipsAtPlayhead(activeTrackId, playheadPosition, assets); setClipContextMenu(null) }}
+            onClick={() => { pasteClipsAtPlayhead(activeTrackId, getLivePlayhead(), assets); setClipContextMenu(null) }}
             disabled={!activeTrackId || copiedClips.length === 0}
             className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             title="Paste at playhead on active track"
@@ -7327,13 +8071,24 @@ function Timeline({ onActiveToolChange }) {
       )}
 
       <CaptionWorkspace
-        isOpen={Boolean(timelineCaptionWorkspaceAsset)}
-        asset={timelineCaptionWorkspaceAsset}
-        scope="timeline"
+        isOpen={Boolean(captionWorkspaceSession)}
+        asset={captionWorkspaceSession?.asset || null}
+        scope={captionWorkspaceSession?.scope || 'timeline'}
         hasExistingTimelineCaptions={clips.some((clip) => {
           if (!clip || !clip.assetId) return false
           return getAssetById(clip.assetId)?.settings?.captionScope === 'timeline'
         })}
+        seedFromClipId={captionWorkspaceSession?.seedFromClipId || null}
+        timelineCaptionSidecarPath={(() => {
+          for (const clip of clips) {
+            if (!clip?.assetId) continue
+            const clipAsset = getAssetById(clip.assetId)
+            if (clipAsset?.settings?.captionScope === 'timeline' && clipAsset.settings.captionTranscriptPath) {
+              return clipAsset.settings.captionTranscriptPath
+            }
+          }
+          return null
+        })()}
         currentProjectHandle={currentProjectHandle}
         timelineSize={(() => {
           const s = useProjectStore.getState().getCurrentTimelineSettings?.()
@@ -7345,8 +8100,12 @@ function Timeline({ onActiveToolChange }) {
         addFolder={addFolder}
         addAsset={addAsset}
         updateAsset={updateAsset}
-        onPlaceOnTimeline={handlePlaceTimelineCaptionOnTimeline}
-        onClose={() => setTimelineCaptionWorkspaceAsset(null)}
+        onPlaceOnTimeline={(captionAsset) => (
+          captionWorkspaceSession?.scope === 'asset'
+            ? handlePlaceAssetCaptionOnTimeline(captionAsset, captionWorkspaceSession?.replaceClipId)
+            : handlePlaceTimelineCaptionOnTimeline(captionAsset)
+        )}
+        onClose={() => setCaptionWorkspaceSession(null)}
       />
     </div>
   )

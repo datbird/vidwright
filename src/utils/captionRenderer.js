@@ -179,6 +179,33 @@ export function renderCaptionFrame({
   })
 }
 
+// Live captions clips (clip.type === 'captions'): draw exactly the frame the
+// baked overlay would contain at this time, through a scratch canvas so the
+// caller's composited state survives whatever clearing the frame renderer
+// does. Both the preview compositor and the exporter call this.
+let liveCaptionScratch = null
+export function drawLiveCaptionsFrame(targetCtx, width, height, captionsData, time) {
+  const cues = Array.isArray(captionsData?.cues) ? captionsData.cues : []
+  if (!targetCtx || !width || !height || cues.length === 0) return
+  const w = Math.max(1, Math.ceil(width))
+  const h = Math.max(1, Math.ceil(height))
+  if (!liveCaptionScratch) liveCaptionScratch = document.createElement('canvas')
+  if (liveCaptionScratch.width !== w) liveCaptionScratch.width = w
+  if (liveCaptionScratch.height !== h) liveCaptionScratch.height = h
+  const scratchCtx = liveCaptionScratch.getContext('2d')
+  scratchCtx.clearRect(0, 0, w, h)
+  renderCaptionFrame({
+    ctx: scratchCtx,
+    width: w,
+    height: h,
+    preset: captionsData?.preset || null,
+    cues,
+    time,
+    transparent: true,
+  })
+  targetCtx.drawImage(liveCaptionScratch, 0, 0, width, height)
+}
+
 export function renderCaptionPresetPreviewDataUrl(preset, width = 240, height = 140, globalOverrides = null) {
   if (typeof document === 'undefined') return null
 
@@ -222,6 +249,7 @@ export async function generateCaptionVideoBlob({
   height,
   duration,
   fps,
+  onProgress,
 }) {
   if (typeof MediaRecorder === 'undefined') {
     throw new Error('Transparent caption export is not supported in this runtime.')
@@ -237,6 +265,7 @@ export async function generateCaptionVideoBlob({
       height,
       duration,
       fps,
+      onProgress,
     })
   }
   const canvas = document.createElement('canvas')
@@ -317,8 +346,21 @@ export async function generateCaptionVideoBlob({
       resolve(blob)
     }
 
+    // The recorder runs at real time (captureStream), so a long timeline
+    // renders for its own duration — frame count is honest progress.
+    let lastReportedPercent = -1
+    const reportProgress = () => {
+      if (typeof onProgress !== 'function') return
+      const percent = Math.min(99, Math.floor((frame / totalFrames) * 100))
+      if (percent > lastReportedPercent) {
+        lastReportedPercent = percent
+        onProgress(percent)
+      }
+    }
+
     drawFrame()
     recorder.start()
+    reportProgress()
 
     if (totalFrames <= 1) {
       recorder.stop()
@@ -328,6 +370,7 @@ export async function generateCaptionVideoBlob({
     timer = setInterval(() => {
       frame += 1
       drawFrame()
+      reportProgress()
       if (frame >= totalFrames - 1) {
         clearInterval(timer)
         timer = null

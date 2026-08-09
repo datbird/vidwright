@@ -3,15 +3,22 @@ import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
 import videoCache from '../services/videoCache'
 import { hasUsablePlaybackCache } from '../services/playbackCache'
-import { getAnimatedAdjustmentSettings, getAnimatedTransform, getAnimatedShapeProperties } from '../utils/keyframes'
+import { getAnimatedAdjustmentSettings, getAnimatedTransform, getAnimatedShapeProperties, getAnimatedShapeMask } from '../utils/keyframes'
 import {
   applyAdjustmentSettingsToImageData,
   buildCssFilterFromAdjustments,
   hasAdjustmentEffect,
   hasTonalAdjustmentEffect,
+  hasTransformingAdjustmentTransform,
+  needsAdvancedColorPass,
   normalizeAdjustmentSettings,
 } from '../utils/adjustments'
 import { applyAdjustmentSettingsToCanvasGpu } from '../utils/adjustmentsGpu'
+import { LUTS_CHANGED_EVENT } from '../services/lutLibrary'
+import { registerPreviewFrameSource, unregisterPreviewFrameSource } from '../services/previewFrameTap'
+import { getShapeMaskCanvases, getShapeMaskSignature } from '../utils/shapeMask'
+import { getRenderAdjustments, getRenderEffects, isClipBypassed } from '../utils/clipBypass'
+import { drawLiveCaptionsFrame } from '../utils/captionRenderer'
 import {
   applyBlurPassesToCanvas,
   applyEffectsToTransform,
@@ -54,7 +61,13 @@ const PRELOAD_LOOKAHEAD = 2.5
 const PLAYBACK_DIAG_KEY = 'vidwright-playback-diag'
 const SCRUB_ACTIVE_WINDOW_MS = 220
 const SCRUB_SETTLE_DELAY_MS = SCRUB_ACTIVE_WINDOW_MS + 45
-const SCRUB_READY_TOLERANCE = 0.18
+// While scrubbing, chase the playhead whenever the presented frame is more
+// than ~one frame away. Completion-driven seeking (issueScrubSeek) already
+// caps this at one in-flight seek per video, so a tight tolerance costs no
+// extra concurrency — it just keeps the picture tracking the hand instead
+// of updating in multi-frame notches. (Was a fixed 0.18s, which read as a
+// ~4-frame dead zone at 24fps during slow cut-point hunting.)
+const getScrubReadyTolerance = (fps) => Math.max(0.04, 1 / Math.max(1, Number(fps) || 24))
 // If a scrub seek never presents a frame (element evicted, src cleared),
 // allow a replacement seek after this long instead of blocking the element.
 const SCRUB_SEEK_STALL_MS = 400
@@ -82,7 +95,9 @@ function logCanvasDiag(event, payload = {}) {
   console.log(`[CanvasPreview] ${event}`, { t: nowSeconds, ...payload })
 }
 
-function getClipPlaybackTimingAtTimeline(clip, timelineTime, endOffset = 0.01, options = {}) {
+// Exported for Match Frame (Timeline.jsx): maps a timeline time to the clip's
+// source time with the same speed/ramp/reverse/trim math the preview uses.
+export function getClipPlaybackTimingAtTimeline(clip, timelineTime, endOffset = 0.01, options = {}) {
   if (!clip) return { time: 0, rawTime: 0, clamped: false, minTime: 0, maxTime: 0 }
   const baseScale = clip.sourceTimeScale || (clip.timelineFps && clip.sourceFps
     ? clip.timelineFps / clip.sourceFps
@@ -116,7 +131,7 @@ function getClipPlaybackTimingAtTimeline(clip, timelineTime, endOffset = 0.01, o
   }
 }
 
-function getClipPlaybackTimeAtTimeline(clip, timelineTime, endOffset = 0.01, options = {}) {
+export function getClipPlaybackTimeAtTimeline(clip, timelineTime, endOffset = 0.01, options = {}) {
   return getClipPlaybackTimingAtTimeline(clip, timelineTime, endOffset, options).time
 }
 
@@ -147,7 +162,7 @@ function resolvePreviewUrl(clip, getAssetById, useProxyPlaybackForAssets) {
 
 function hasManagedCanvasEffect(clip, clipTime) {
   if (!clip) return false
-  const effects = clip.effects || []
+  const effects = getRenderEffects(clip)
   return hasPixelFilterEffect(effects, clipTime)
     || hasGlslEffect(effects)
     || hasVignetteEffect(effects, clipTime)
@@ -321,7 +336,24 @@ function clipContainsCanvasPoint(point, clip, rect, transform = {}, transitionSt
 }
 
 function getMaskInfo(clip, getAssetById, time, isCachedRender = false) {
-  if (isCachedRender || !clip?.effects) return null
+  if (isClipBypassed(clip, 'mask')) return null
+  if (isCachedRender) return null
+  // Parametric shape mask (clip.shapeMask) wins over a raster mask effect
+  // for now — the AI/raster masks fold into the same home later. Feather
+  // and invert are baked into the rasters, so consumers treat it as a plain
+  // non-inverted matte: the 2D path composites the alpha encoding, the GPU
+  // path samples the opaque luminance encoding.
+  const animatedShapeMask = getAnimatedShapeMask(clip, time - (clip?.startTime || 0))
+  const shapeCanvases = getShapeMaskCanvases(animatedShapeMask)
+  if (shapeCanvases) {
+    return {
+      shapeCanvasAlpha: shapeCanvases.alpha,
+      shapeCanvasLuma: shapeCanvases.luma,
+      shapeSignature: getShapeMaskSignature(animatedShapeMask),
+      invertMask: false,
+    }
+  }
+  if (!clip?.effects) return null
   const effect = clip.effects.find((entry) => entry?.type === 'mask' && entry.enabled)
   if (!effect) return null
   const maskAsset = getAssetById(effect.maskAssetId)
@@ -364,6 +396,7 @@ function CanvasPreviewRenderer({
   timelineFps = 30,
   onClipPointerDown,
   onClipDoubleClick,
+  playbackStatsRef = null,
 }) {
   const canvasRef = useRef(null)
   const imageCacheRef = useRef(new Map())
@@ -638,7 +671,7 @@ function CanvasPreviewRenderer({
     const clipTime = time - (matteClip.startTime || 0)
     const matteTransform = applyEffectsToTransform(
       getAnimatedTransform(matteClip, clipTime) || matteClip.transform || {},
-      matteClip.effects,
+      getRenderEffects(matteClip),
       clipTime
     )
     const matteOpacity = typeof matteTransform.opacity === 'number' ? matteTransform.opacity / 100 : 1
@@ -750,7 +783,7 @@ function CanvasPreviewRenderer({
     const isFullBake = isFullBakeFresh(clip)
     const transitionStyle = getTransitionStyleForClip(transitionInfo, clip)
     const resolveClipTransformAtTime = (sampleClipTime) => (
-      applyEffectsToTransform(getAnimatedTransform(clip, sampleClipTime) || clip.transform || {}, clip.effects, sampleClipTime)
+      applyEffectsToTransform(getAnimatedTransform(clip, sampleClipTime) || clip.transform || {}, getRenderEffects(clip), sampleClipTime)
     )
     const liveClipTransform = resolveClipTransformAtTime(clipTime)
     const clipTransform = isFullBake
@@ -792,9 +825,9 @@ function CanvasPreviewRenderer({
     const blendMode = clipTransform?.blendMode || 'normal'
     const blurPx = transitionStyle?.blur ?? (clipTransform?.blur > 0 ? clipTransform.blur : null)
     const adjustmentSettings = normalizeAdjustmentSettings(
-      isFullBake ? {} : (getAnimatedAdjustmentSettings(clip, clipTime) || clip.adjustments || {})
+      isFullBake ? {} : getRenderAdjustments(clip, clipTime)
     )
-    const usesTonalAdjustments = hasTonalAdjustmentEffect(adjustmentSettings)
+    const usesTonalAdjustments = needsAdvancedColorPass(adjustmentSettings)
     const adjustmentFilter = buildCssFilterFromAdjustments(adjustmentSettings)
     const clipAdjustmentFilterValue = adjustmentFilter !== 'none' ? adjustmentFilter : null
     const usesManagedEffects = !isFullBake && hasManagedCanvasEffect(clip, clipTime)
@@ -829,8 +862,9 @@ function CanvasPreviewRenderer({
     if (blurPx != null) filterParts.push(`blur(${blurPx}px)`)
     offCtx.filter = filterParts.length > 0 ? filterParts.join(' ') : 'none'
 
-    if ((clip.type === 'text' || clip.type === 'shape') && !isFullBake) {
+    if ((clip.type === 'text' || clip.type === 'shape' || clip.type === 'captions') && !isFullBake) {
       const isShapeClip = clip.type === 'shape'
+      const isCaptionsClip = clip.type === 'captions'
       const getTextShapeFrame = (sampleClipTime) => {
         const animatedShapeProperties = isShapeClip ? getAnimatedShapeProperties(clip, sampleClipTime) : null
         const shapeClip = isShapeClip ? { ...clip, shapeProperties: animatedShapeProperties || clip.shapeProperties } : clip
@@ -840,7 +874,9 @@ function CanvasPreviewRenderer({
         return { shapeClip, rect }
       }
       const drawNativeClip = (targetCtx, rect, shapeClip, sampleClipTime) => {
-        if (isShapeClip) {
+        if (isCaptionsClip) {
+          drawLiveCaptionsFrame(targetCtx, rect.width, rect.height, clip.captions, sampleClipTime)
+        } else if (isShapeClip) {
           drawShape(targetCtx, { x: 0, y: 0, width: rect.width, height: rect.height }, shapeClip)
         } else {
           drawText(targetCtx, rect, clip, 1, sampleClipTime)
@@ -923,7 +959,7 @@ function CanvasPreviewRenderer({
         const isTransitionClip = !!transitionStyle
         const shouldHoldTransitionFrame = isTransitionClip && transitionPlayback.clamped
         const seekThreshold = state.isScrubbingPreview
-          ? SCRUB_READY_TOLERANCE
+          ? getScrubReadyTolerance(state.fps)
           : (state.isPlaying ? (seekDriven ? 0.12 : (shouldHoldTransitionFrame ? 0.025 : 0.16)) : 0.025)
         if (!state.isScrubbingPreview && video.readyState >= 1 && timeDiff > seekThreshold) {
           video.currentTime = targetTime
@@ -1003,15 +1039,15 @@ function CanvasPreviewRenderer({
         if (gpuSamples.length === 0) return
 
         let gpuMaskSpec = null
-        if (gpuMaskInfo?.url) {
-          const maskImage = getImageForUrl(gpuMaskInfo.url)
-          if (maskImage) {
+        if (gpuMaskInfo?.shapeCanvasLuma || gpuMaskInfo?.url) {
+          const maskSource = gpuMaskInfo.shapeCanvasLuma || getImageForUrl(gpuMaskInfo.url)
+          if (maskSource) {
             const maskCorners = getClipQuadCorners(rect, sampleTransformFor(clipTime), transitionStyle)
             if (maskCorners) {
               gpuMaskSpec = {
-                source: maskImage,
+                source: maskSource,
                 sourceKey: `${clip.id}:mask`,
-                sourceVersion: gpuMaskInfo.url,
+                sourceVersion: gpuMaskInfo.shapeSignature || gpuMaskInfo.url,
                 corners: maskCorners,
                 invert: !!gpuMaskInfo.invertMask,
                 blurPx: (!usesTonalAdjustments && blurPx != null)
@@ -1078,7 +1114,7 @@ function CanvasPreviewRenderer({
 
       const maskInfo = getMaskInfo(clip, getAssetById, time, isCachedRender)
       if (maskInfo) {
-        const maskCanvas = getProcessedMaskForUrl(maskInfo.url)
+        const maskCanvas = maskInfo.shapeCanvasAlpha || getProcessedMaskForUrl(maskInfo.url)
         if (maskCanvas) {
           maskCtx.clearRect(0, 0, width, height)
           for (const sample of motionBlurSamples) {
@@ -1152,14 +1188,18 @@ function CanvasPreviewRenderer({
     const height = state.height
     const clipTime = time - (clip.startTime || 0)
     const adjustmentSettings = normalizeAdjustmentSettings(
-      getAnimatedAdjustmentSettings(clip, clipTime) || clip.adjustments || {}
+      getRenderAdjustments(clip, clipTime)
     )
     const baseTransform = getAnimatedTransform(clip, clipTime) || clip.transform || {}
-    const clipTransform = applyEffectsToTransform(baseTransform, clip.effects, clipTime)
+    const clipTransform = applyEffectsToTransform(baseTransform, getRenderEffects(clip), clipTime)
     const usesManagedEffects = hasManagedCanvasEffect(clip, clipTime)
     const adjustmentIsActive = hasAdjustmentEffect(adjustmentSettings)
+    // A transform-only adjustment layer (e.g. scale 110% to push everything
+    // in) still composites: it draws the transformed stage copy back over
+    // the stage, matching Premiere-style adjustment-layer transforms.
+    const transformIsActive = hasTransformingAdjustmentTransform(clipTransform)
     const glslQualityScale = getGlslPreviewQualityScale(state.glslPreviewQuality)
-    if (!adjustmentIsActive && !usesManagedEffects) return
+    if (!adjustmentIsActive && !usesManagedEffects && !transformIsActive) return
 
     // GPU compositor path: fully native adjustment layer (color/tonal/blur
     // grade of the stage + managed chain), mirroring the exporter.
@@ -1190,7 +1230,7 @@ function CanvasPreviewRenderer({
     adjustmentCtx.drawImage(ctx.canvas, 0, 0)
 
     let outputCanvas = buffers.adjustmentCanvas
-    if (hasTonalAdjustmentEffect(adjustmentSettings)) {
+    if (needsAdvancedColorPass(adjustmentSettings)) {
       outputCanvas = applyAdvancedAdjustmentsToCanvas(buffers.adjustmentCanvas, adjustmentSettings, width, height)
     } else if (adjustmentIsActive) {
       const filter = buildCssFilterFromAdjustments(adjustmentSettings)
@@ -1275,6 +1315,7 @@ function CanvasPreviewRenderer({
   const drawFrame = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+    const drawStartMs = getNowMs()
     const state = {
       ...latestRef.current,
       ...useTimelineStore.getState(),
@@ -1358,7 +1399,7 @@ function CanvasPreviewRenderer({
         }
 
         const readyTolerance = state.isScrubbingPreview
-          ? SCRUB_READY_TOLERANCE
+          ? getScrubReadyTolerance(fps)
           : (seekDriven ? 0.12 : ((isTransitionClip && state.isPlaying && !loopSeekHoldActive) ? 0.16 : 0.025))
         if (Math.abs((video.currentTime || 0) - targetTime) > readyTolerance) {
           if (state.isScrubbingPreview) {
@@ -1429,7 +1470,7 @@ function CanvasPreviewRenderer({
         applyAdjustmentLayer(stageCtx, clip, time, frameIndex, clipState)
         continue
       }
-      if (clip.type === 'video' || clip.type === 'image' || clip.type === 'text' || clip.type === 'shape') {
+      if (clip.type === 'video' || clip.type === 'image' || clip.type === 'text' || clip.type === 'shape' || clip.type === 'captions') {
         const status = drawVisualClip(stageCtx, entry, time, transitionInfo, clipState, frameIndex, matteEntryByClipId.get(clip.id) || null)
         if (status === 'unready') sawUnreadyVisual = true
       }
@@ -1486,6 +1527,21 @@ function CanvasPreviewRenderer({
     // commit (post-edit) rather than a stale frame at the same time.
     lastCommittedFrameTimeRef.current = time
     frameCommitSerialRef.current += 1
+    // Playback fps meter: `presented` counts unique timeline frames committed
+    // (a 60Hz commit loop on a 24fps timeline presents 24/s). Counted
+    // unconditionally — the badge only displays while playing, and gating on
+    // play state here would tie the meter to where that flag happens to live.
+    const playbackStats = playbackStatsRef?.current
+    if (playbackStats) {
+      playbackStats.commits += 1
+      // (|| 0) heals a stats object born before drawMs existed (HMR keeps refs).
+      playbackStats.drawMs = (playbackStats.drawMs || 0) + (getNowMs() - drawStartMs)
+      const frameIndex = Math.floor(time * fps + 0.000001)
+      if (frameIndex !== playbackStats.lastFrameIndex) {
+        playbackStats.lastFrameIndex = frameIndex
+        playbackStats.presented += 1
+      }
+    }
     if (loopSeekHoldActive) {
       loopSeekHoldUntilRef.current = 0
     }
@@ -1512,7 +1568,7 @@ function CanvasPreviewRenderer({
     while (getNowMs() < deadline) {
       if (useTimelineStore.getState().isPlaying) return null
       // Force strict seek tolerances — scrub mode would accept video frames
-      // up to 0.18s away from the target.
+      // up to ~a frame away from the target.
       scrubPreviewStateRef.current.activeUntil = 0
       drawFrameRef.current?.()
       const currentPlayhead = useTimelineStore.getState().playheadPosition
@@ -1541,6 +1597,18 @@ function CanvasPreviewRenderer({
     registerLivePreviewCapture(captureLiveFrameAt)
     return () => unregisterLivePreviewCapture(captureLiveFrameAt)
   }, [captureLiveFrameAt])
+
+  // Scopes tap (pull model): expose the committed frame + serial. The getter
+  // costs nothing unless something polls it — the render loop stays clean.
+  useEffect(() => {
+    const getter = () => ({
+      canvas: lastFrameCanvasRef.current,
+      serial: frameCommitSerialRef.current,
+      time: lastCommittedFrameTimeRef.current,
+    })
+    registerPreviewFrameSource(getter)
+    return () => unregisterPreviewFrameSource(getter)
+  }, [])
 
   useEffect(() => {
     const currentPlayhead = Number(playheadPosition) || 0
@@ -1619,6 +1687,17 @@ function CanvasPreviewRenderer({
     }
   }, [])
 
+  // LUT library changes (import finishing, boot load completing) alter what
+  // runColorPass can resolve — repaint the paused frame so a newly imported
+  // LUT shows up without a nudge.
+  useEffect(() => {
+    const handleLutsChanged = () => {
+      if (!useTimelineStore.getState().isPlaying) drawFrameRef.current?.()
+    }
+    window.addEventListener(LUTS_CHANGED_EVENT, handleLutsChanged)
+    return () => window.removeEventListener(LUTS_CHANGED_EVENT, handleLutsChanged)
+  }, [])
+
   useEffect(() => {
     if (!isPlaying) drawFrame()
   }, [
@@ -1679,7 +1758,7 @@ function CanvasPreviewRenderer({
       const clipTime = time - (clip.startTime || 0)
       const transitionStyle = getTransitionStyleForClip(transitionInfo, clip)
       const baseTransform = getAnimatedTransform(clip, clipTime) || clip.transform || {}
-      const clipTransform = applyEffectsToTransform(baseTransform, clip.effects, clipTime)
+      const clipTransform = applyEffectsToTransform(baseTransform, getRenderEffects(clip), clipTime)
       const { width: sourceWidth, height: sourceHeight } = getClipHitSourceDimensions({
         clip,
         clipTime,
@@ -1707,6 +1786,7 @@ function CanvasPreviewRenderer({
   return (
     <canvas
       ref={canvasRef}
+      data-preview-popout-source="canvas"
       className="absolute inset-0 h-full w-full bg-black"
       width={safeWidth}
       height={safeHeight}

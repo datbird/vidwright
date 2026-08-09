@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Copy, Loader2, Pause, Play, RefreshCw, RotateCcw, Sparkles, Wand2, X } from 'lucide-react'
+import { Check, ChevronDown, Copy, Download, Loader2, Pause, Play, RefreshCw, RotateCcw, Sparkles, Wand2, X } from 'lucide-react'
 import {
   CAPTION_PRESETS,
   DEFAULT_CAPTION_PRESET_ID,
@@ -7,13 +7,26 @@ import {
 } from '../config/captionPresets'
 import { DEFAULT_KINETIC_ACCENT_COLOR, buildKineticStyleWithColors } from '../utils/kineticCaptionRenderer'
 import { isElectron, writeGeneratedOverlayToProject } from '../services/fileSystem'
+import { useProjectStore } from '../stores/projectStore'
+import useTimelineStore from '../stores/timelineStore'
 import {
   buildCaptionAssetName,
   ensureCaptionsFolder,
   loadCaptionSidecar,
   saveCaptionSidecar,
 } from '../services/captionProject'
-import { transcribeWithComfyUI, transcribeTimeline } from '../services/captionComfyTranscription'
+import {
+  transcribeAsset,
+  transcribeTimelineAudio,
+  resolveCaptionEngine,
+  getCaptionEnginePreference,
+  getCaptionModelPreference,
+  setCaptionModelPreference,
+  getLocalCaptionEngineStatus,
+  installLocalCaptionEngine,
+  canRemoveLocalCaptionModels,
+  removeLocalCaptionModel,
+} from '../services/captionTranscription'
 import {
   generateCaptionVideoBlob,
   renderCaptionFrame,
@@ -296,6 +309,56 @@ function createEmptyDraft(asset) {
 // re-transcribe. Keyed by project handle; lives for the app session only.
 const timelineCaptionSessionCache = new Map()
 
+// Rebuild the workspace's editable state from a live captions clip, shaped
+// like a sidecar draft so applySidecarDraft can consume it. The clip stores
+// render-ready cues (draft cues with per-cue globalOverrides baked in) plus —
+// since the edit round-trip shipped — the workspace's own controls snapshot.
+// Clips placed before the snapshot existed reverse-map their controls from
+// the first cue's globalOverrides: those ARE the resolved controls, minus
+// only the distinction between a user-picked text color and the preset's.
+function draftFromLiveCaptionsClip(clip) {
+  const captions = clip?.captions
+  const renderCues = Array.isArray(captions?.cues) ? captions.cues : []
+  if (renderCues.length === 0) return null
+  const cues = renderCues.map(({ globalOverrides, ...cue }) => cue)
+  const {
+    verticalPlacement,
+    horizontalPlacement,
+    motionProfile,
+    sizeScale,
+    verticalOffset,
+    textStyle: overrideTextStyle,
+    subtitleColor,
+    subtitlePosition: overridePosition,
+    ...overrideStyleControls
+  } = renderCues[0]?.globalOverrides || {}
+  const ws = captions.workspace || null
+  return {
+    presetId: ws?.presetId || captions.preset?.id || null,
+    accentColor: ws
+      ? (ws.accentColor || null)
+      : (captions.preset?.traditional ? null : captions.preset?.keyWordColor || null),
+    textColor: ws ? (ws.textColor ?? null) : (subtitleColor ?? null),
+    textStyle: ws?.textStyle || overrideTextStyle || null,
+    subtitlePosition: ws?.subtitlePosition || overridePosition || null,
+    styleControls: ws?.styleControls || overrideStyleControls,
+    globalVertical: ws?.globalVertical || verticalPlacement || null,
+    globalHorizontal: ws?.globalHorizontal || horizontalPlacement || null,
+    globalMotion: ws?.globalMotion || motionProfile || null,
+    globalSizeScale: typeof ws?.globalSizeScale === 'number'
+      ? ws.globalSizeScale
+      : (typeof sizeScale === 'number' ? sizeScale : null),
+    globalVerticalOffset: typeof ws?.globalVerticalOffset === 'number'
+      ? ws.globalVerticalOffset
+      : (typeof verticalOffset === 'number' ? verticalOffset : null),
+    modelId: ws?.modelId || null,
+    words: Array.isArray(ws?.words) ? ws.words : [],
+    transcriptText: cuesToTranscript(cues),
+    cues,
+    audioDuration: ws?.audioDuration || Number(clip?.duration) || null,
+  }
+}
+
 // An approximate TikTok UI overlaid on the positioning preview so the user can
 // keep captions clear of the platform chrome (right action rail + bottom
 // caption/handle/music). viewBox is the real frame size and the SVG is
@@ -371,6 +434,15 @@ function CaptionWorkspace({
   // Timeline scope only: whether a caption track already exists on the timeline,
   // so generating can warn that it will be replaced.
   hasExistingTimelineCaptions = false,
+  // Timeline scope only: sidecar path saved by the last generated timeline
+  // overlay, used to restore cues/style after an app restart when the
+  // in-memory session cache is cold.
+  timelineCaptionSidecarPath = null,
+  // Timeline scope only: id of a live captions clip to edit. Set by the
+  // timeline's double-click / Edit Captions entry points; the workspace seeds
+  // itself from that clip's cues + workspace snapshot ahead of every other
+  // restore source, and Generate replaces the clip in place.
+  seedFromClipId = null,
   currentProjectHandle,
   timelineSize,
   folders,
@@ -388,10 +460,33 @@ function CaptionWorkspace({
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [placeOnTimeline, setPlaceOnTimeline] = useState(true)
+  // Redesign state: the cue list is the primary surface. Selecting a cue
+  // seeks the preview and opens its details in the right rail; the preview
+  // folds away to give style room; the transcribe controls collapse to a
+  // strip once cues exist.
+  const [selectedCueId, setSelectedCueId] = useState(null)
+  const [cueSearch, setCueSearch] = useState('')
+  // The preview is always visible: style controls (size, nudge, colors) are
+  // meaningless without live feedback. A collapsible preview shipped briefly
+  // and died the same night — collapsed, dragging Size showed nothing.
+  const [transcribeDetailsOpen, setTranscribeDetailsOpen] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
+  // 0–100 while a transcription reports real progress (mix ≈ 0–40, whisper
+  // decode ≈ 40–100); null = indeterminate, spinner only.
+  const [transcribeProgress, setTranscribeProgress] = useState(null)
+  // 0–100 while the animated overlay records (real-time render, one percent
+  // per elapsed hundredth of the timeline); null = indeterminate.
+  const [generateProgress, setGenerateProgress] = useState(null)
   const [error, setError] = useState('')
   const [errorExpanded, setErrorExpanded] = useState(false)
   const [errorCopied, setErrorCopied] = useState(false)
+  const [engineStatus, setEngineStatus] = useState(null)
+  const [modelPreference, setModelPreference] = useState(() => getCaptionModelPreference())
+  // Project-stored extra vocabulary for transcription hints; the transcription
+  // seam gives it budget priority over the auto-derived project words.
+  const captionVocabulary = useProjectStore((s) => s.currentProject?.settings?.captionVocabulary || '')
+  const [isInstallingEngine, setIsInstallingEngine] = useState(false)
+  const [engineInstallProgress, setEngineInstallProgress] = useState(null)
   const [savedCaptionStyles, setSavedCaptionStyles] = useState(() => loadSavedCaptionStyles())
   const [captionStyleName, setCaptionStyleName] = useState('')
   const [activeSavedStyleId, setActiveSavedStyleId] = useState(null)
@@ -770,9 +865,63 @@ function CaptionWorkspace({
     setScrubDisplay(1.2)
     setDraft(createEmptyDraft(asset))
 
-    // Timeline scope has no per-asset sidecar. Restore the session cache so the
-    // transcription and style choices survive a reopen (re-transcribe is manual).
+    // Hydrate a previously saved draft (cues + style) from a caption sidecar.
+    // Shared by asset scope and the timeline cold-start path.
+    const applySidecarDraft = (existingDraft) => {
+      setDraft({
+        modelId: existingDraft.modelId || null,
+        transcriptText: String(existingDraft.transcriptText || ''),
+        words: Array.isArray(existingDraft.words) ? existingDraft.words : [],
+        cues: normalizeCueOrder(existingDraft.cues, existingDraft.audioDuration || asset?.duration),
+        audioDuration: existingDraft.audioDuration || Number(asset?.duration) || null,
+      })
+      setSelectedPresetId(existingDraft.presetId || asset?.settings?.lastCaptionPresetId || DEFAULT_CAPTION_PRESET_ID)
+      if (existingDraft.accentColor) setAccentColor(existingDraft.accentColor)
+      setTextColor(existingDraft.textColor ?? null)
+      if (existingDraft.textStyle) setGlobalTextStyle(existingDraft.textStyle)
+      if (existingDraft.subtitlePosition) setSubtitlePosition(existingDraft.subtitlePosition)
+      const existingStyleControls = existingDraft.styleControls && typeof existingDraft.styleControls === 'object'
+        ? existingDraft.styleControls
+        : {}
+      if (existingStyleControls.fontFamily) setGlobalFontFamily(existingStyleControls.fontFamily)
+      if (existingStyleControls.backgroundColor) setBackgroundColor(existingStyleControls.backgroundColor)
+      if (typeof existingStyleControls.backgroundOpacity === 'number') setBackgroundOpacity(existingStyleControls.backgroundOpacity)
+      if (typeof existingStyleControls.backgroundPadding === 'number') setBackgroundPadding(existingStyleControls.backgroundPadding)
+      if (typeof existingStyleControls.backgroundRadius === 'number') setBackgroundRadius(existingStyleControls.backgroundRadius)
+      if (existingStyleControls.outlineColor) setOutlineColor(existingStyleControls.outlineColor)
+      if (typeof existingStyleControls.outlineThickness === 'number') setOutlineThickness(existingStyleControls.outlineThickness)
+      if (existingStyleControls.shadowColor) setShadowColor(existingStyleControls.shadowColor)
+      if (typeof existingStyleControls.shadowOpacity === 'number') setShadowOpacity(existingStyleControls.shadowOpacity)
+      if (typeof existingStyleControls.shadowBlur === 'number') setShadowBlur(existingStyleControls.shadowBlur)
+      if (typeof existingStyleControls.shadowDistance === 'number') setShadowDistance(existingStyleControls.shadowDistance)
+      // Placement globals: present in live-clip drafts and in sidecars saved
+      // since the round-trip shipped; older sidecars simply keep the defaults.
+      if (existingDraft.globalVertical) setGlobalVertical(existingDraft.globalVertical)
+      if (existingDraft.globalHorizontal) setGlobalHorizontal(existingDraft.globalHorizontal)
+      if (existingDraft.globalMotion) setGlobalMotion(existingDraft.globalMotion)
+      if (typeof existingDraft.globalSizeScale === 'number') setGlobalSizeScale(existingDraft.globalSizeScale)
+      if (typeof existingDraft.globalVerticalOffset === 'number') setGlobalVerticalOffset(existingDraft.globalVerticalOffset)
+    }
+
+    // Timeline scope restore priority: the clip the user asked to edit
+    // (double-click / Edit Captions — the clip is the durable source, so this
+    // works after restarts and on other machines) → the in-memory session
+    // cache (may hold a fresher transcribe than the clip) → any live captions
+    // clip on the timeline (cold-start fallback) → the sidecar saved by the
+    // last baked timeline overlay.
     if (isTimelineScope) {
+      const timelineClips = useTimelineStore.getState().clips
+      const seedClip = seedFromClipId
+        ? timelineClips.find((c) => c.id === seedFromClipId && c.type === 'captions')
+        : null
+      const seedDraft = seedClip ? draftFromLiveCaptionsClip(seedClip) : null
+      if (seedDraft) {
+        applySidecarDraft(seedDraft)
+        setStatusMessage('Editing the captions from your timeline — Generate applies the changes in place.')
+        return () => {
+          cancelled = true
+        }
+      }
       const cached = currentProjectHandle ? timelineCaptionSessionCache.get(currentProjectHandle) : null
       if (cached?.draft) {
         setDraft(cached.draft)
@@ -798,8 +947,30 @@ function CaptionWorkspace({
         if (typeof cached.globalSizeScale === 'number') setGlobalSizeScale(cached.globalSizeScale)
         if (typeof cached.globalVerticalOffset === 'number') setGlobalVerticalOffset(cached.globalVerticalOffset)
         setStatusMessage('Restored your last timeline captions — re-transcribe if the audio changed.')
+      } else {
+        const liveClip = timelineClips.find((c) => c.type === 'captions')
+        const liveDraft = liveClip ? draftFromLiveCaptionsClip(liveClip) : null
+        if (liveDraft) {
+          applySidecarDraft(liveDraft)
+          setStatusMessage('Restored the captions from your timeline clip — Generate applies changes in place.')
+        } else if (currentProjectHandle && timelineCaptionSidecarPath) {
+          ;(async () => {
+            try {
+              const existingDraft = await loadCaptionSidecar(currentProjectHandle, timelineCaptionSidecarPath)
+              if (!existingDraft || cancelled) return
+              applySidecarDraft(existingDraft)
+              setStatusMessage('Restored your last timeline captions — re-transcribe if the audio changed.')
+            } catch (loadError) {
+              if (!cancelled) {
+                console.warn('Could not load the timeline caption draft:', loadError)
+              }
+            }
+          })()
+        }
       }
-      return undefined
+      return () => {
+        cancelled = true
+      }
     }
 
     const transcriptPath = asset?.settings?.captionTranscriptPath
@@ -809,33 +980,7 @@ function CaptionWorkspace({
       try {
         const existingDraft = await loadCaptionSidecar(currentProjectHandle, transcriptPath)
         if (!existingDraft || cancelled) return
-
-        setDraft({
-          modelId: existingDraft.modelId || null,
-          transcriptText: String(existingDraft.transcriptText || ''),
-          words: Array.isArray(existingDraft.words) ? existingDraft.words : [],
-          cues: normalizeCueOrder(existingDraft.cues, existingDraft.audioDuration || asset?.duration),
-          audioDuration: existingDraft.audioDuration || Number(asset?.duration) || null,
-        })
-        setSelectedPresetId(existingDraft.presetId || asset?.settings?.lastCaptionPresetId || DEFAULT_CAPTION_PRESET_ID)
-        if (existingDraft.accentColor) setAccentColor(existingDraft.accentColor)
-        setTextColor(existingDraft.textColor ?? null)
-        if (existingDraft.textStyle) setGlobalTextStyle(existingDraft.textStyle)
-        if (existingDraft.subtitlePosition) setSubtitlePosition(existingDraft.subtitlePosition)
-        const existingStyleControls = existingDraft.styleControls && typeof existingDraft.styleControls === 'object'
-          ? existingDraft.styleControls
-          : {}
-        if (existingStyleControls.fontFamily) setGlobalFontFamily(existingStyleControls.fontFamily)
-        if (existingStyleControls.backgroundColor) setBackgroundColor(existingStyleControls.backgroundColor)
-        if (typeof existingStyleControls.backgroundOpacity === 'number') setBackgroundOpacity(existingStyleControls.backgroundOpacity)
-        if (typeof existingStyleControls.backgroundPadding === 'number') setBackgroundPadding(existingStyleControls.backgroundPadding)
-        if (typeof existingStyleControls.backgroundRadius === 'number') setBackgroundRadius(existingStyleControls.backgroundRadius)
-        if (existingStyleControls.outlineColor) setOutlineColor(existingStyleControls.outlineColor)
-        if (typeof existingStyleControls.outlineThickness === 'number') setOutlineThickness(existingStyleControls.outlineThickness)
-        if (existingStyleControls.shadowColor) setShadowColor(existingStyleControls.shadowColor)
-        if (typeof existingStyleControls.shadowOpacity === 'number') setShadowOpacity(existingStyleControls.shadowOpacity)
-        if (typeof existingStyleControls.shadowBlur === 'number') setShadowBlur(existingStyleControls.shadowBlur)
-        if (typeof existingStyleControls.shadowDistance === 'number') setShadowDistance(existingStyleControls.shadowDistance)
+        applySidecarDraft(existingDraft)
         setStatusMessage('Loaded the last saved caption draft for this video.')
       } catch (loadError) {
         if (!cancelled) {
@@ -847,7 +992,7 @@ function CaptionWorkspace({
     return () => {
       cancelled = true
     }
-  }, [asset, currentProjectHandle, isOpen])
+  }, [asset, scope, currentProjectHandle, timelineCaptionSidecarPath, seedFromClipId, isOpen])
 
   // Grab a representative still for the positioning preview. Asset scope uses
   // the source clip (mid-point); timeline scope uses the frame under the
@@ -907,16 +1052,63 @@ function CaptionWorkspace({
     }
   }, [captureUrl, captureTime, isOpen])
 
+  // The engine row needs to know whether the local whisper engine is
+  // installed; refresh whenever the dialog opens.
+  useEffect(() => {
+    if (!isOpen) return undefined
+    let cancelled = false
+    getLocalCaptionEngineStatus().then((status) => {
+      if (!cancelled) setEngineStatus(status)
+    })
+    return () => { cancelled = true }
+  }, [isOpen])
+
   if (!isOpen || !asset) return null
 
   const busy = isTranscribing || isGenerating
   const cueDuration = getDraftDuration(draft, asset)
+
+  const CAPTION_MODEL_TIERS = [
+    { id: 'base', label: 'Fast', size: '142 MB' },
+    { id: 'small', label: 'Accurate', size: '466 MB' },
+    { id: 'large-v3-turbo', label: 'Best', size: '1.6 GB' },
+  ]
+  const engineStatusLoaded = Boolean(engineStatus)
+  const localEngineSupported = Boolean(engineStatus?.platformSupported)
+  // Platforms without a whisper build (macOS until our CI produces one) keep
+  // captions on ComfyUI instead of losing them outright.
+  const platformUsesComfy = engineStatusLoaded && !localEngineSupported
+  const hasEngineBinary = Boolean(engineStatus?.binaryPath)
+  const installedModelIds = new Set((engineStatus?.models || []).map((m) => m.id))
+  const selectedTier = CAPTION_MODEL_TIERS.find((tier) => tier.id === modelPreference) || CAPTION_MODEL_TIERS[0]
+  const selectedTierInstalled = hasEngineBinary && installedModelIds.has(selectedTier.id)
+  const canRemoveModels = canRemoveLocalCaptionModels()
+  const removableTiers = CAPTION_MODEL_TIERS.filter(
+    (tier) => installedModelIds.has(tier.id) && tier.id !== selectedTier.id
+  )
+  // The retired ComfyUI path stays reachable through a localStorage escape
+  // hatch only ('vidwright-caption-engine' = 'comfyui') — no UI for it.
+  const captionsUseComfy = getCaptionEnginePreference() === 'comfyui' || platformUsesComfy
+  const engineReady = captionsUseComfy || selectedTierInstalled
+  const showEngineInstall = !captionsUseComfy && localEngineSupported && !selectedTierInstalled
+  const engineStatusLine = platformUsesComfy
+    ? 'Local captions are not available on this platform yet — using ComfyUI (Qwen3-ASR).'
+    : captionsUseComfy
+      ? 'Using ComfyUI (Qwen3-ASR) — legacy override.'
+      : isInstallingEngine
+        ? (engineInstallProgress?.message || 'Installing caption engine…')
+        : selectedTierInstalled
+          ? (selectedTier.id === 'large-v3-turbo'
+            ? 'Runs on this machine — top accuracy, roughly realtime on CPU.'
+            : 'Runs on this machine — no ComfyUI needed.')
+          : 'One-time download — captions run on this machine, no ComfyUI needed.'
+
   // Timeline mode can always transcribe (the audio mixer will report no-audio
   // conditions at mix time with a clear message). Asset mode still needs a
   // video with an audio track.
-  const canTranscribe = isTimelineScope
+  const canTranscribe = engineReady && !isInstallingEngine && (isTimelineScope
     ? !busy
-    : (asset.type === 'video' && asset.hasAudio !== false && !busy)
+    : (asset.type === 'video' && asset.hasAudio !== false && !busy))
   const canGenerate = draft.cues.length > 0 && !busy && addAsset
 
   const updateCue = (cueId, field, value) => {
@@ -1003,24 +1195,79 @@ function CaptionWorkspace({
     })
   }
 
+  const refreshEngineStatus = async () => {
+    const status = await getLocalCaptionEngineStatus()
+    setEngineStatus(status)
+    return status
+  }
+
+  const handleModelPreferenceChange = (value) => {
+    setCaptionModelPreference(value)
+    setModelPreference(value)
+  }
+
+  const handleInstallEngine = async () => {
+    setError('')
+    setErrorExpanded(false)
+    setIsInstallingEngine(true)
+    setEngineInstallProgress(null)
+    try {
+      await installLocalCaptionEngine({
+        modelId: modelPreference,
+        onProgress: (update) => setEngineInstallProgress(update),
+      })
+      const status = await refreshEngineStatus()
+      setStatusMessage(status?.available
+        ? 'Local caption engine installed — transcription now runs on this machine.'
+        : 'The install finished but the engine did not come up — try again or use ComfyUI.')
+    } catch (installError) {
+      setError(installError?.message || 'Caption engine install failed.')
+      await refreshEngineStatus()
+    } finally {
+      setIsInstallingEngine(false)
+      setEngineInstallProgress(null)
+    }
+  }
+
+  const handleRemoveModel = async (modelId) => {
+    setError('')
+    setErrorExpanded(false)
+    try {
+      const result = await removeLocalCaptionModel(modelId)
+      await refreshEngineStatus()
+      const tier = CAPTION_MODEL_TIERS.find((t) => t.id === modelId)
+      const freedMB = Math.round((Number(result?.freedBytes) || 0) / 1e6)
+      setStatusMessage(`Removed the ${tier?.label || modelId} model${freedMB ? ` — freed ${freedMB} MB` : ''}.`)
+    } catch (removeError) {
+      setError(removeError?.message || 'Could not remove the caption model.')
+      await refreshEngineStatus()
+    }
+  }
+
   const handleTranscribe = async () => {
     setError('')
     setErrorExpanded(false)
     setIsTranscribing(true)
     try {
+      const engine = await resolveCaptionEngine()
+      const engineLabel = engine === 'local' ? 'the local engine' : 'Qwen3-ASR (ComfyUI)'
       setStatusMessage(
         isTimelineScope
-          ? 'Mixing timeline audio for Qwen3-ASR…'
-          : 'Connecting to ComfyUI for Qwen3-ASR transcription...'
+          ? `Mixing timeline audio for ${engineLabel}…`
+          : (engine === 'local'
+            ? 'Transcribing on this machine…'
+            : 'Connecting to ComfyUI for Qwen3-ASR transcription...')
       )
 
       const onProgress = (progress) => {
-        setStatusMessage(progress?.message || 'Transcribing with Qwen3-ASR...')
+        setStatusMessage(progress?.message || 'Transcribing…')
+        const value = Number(progress?.progress)
+        setTranscribeProgress(Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null)
       }
 
       const nextDraft = isTimelineScope
-        ? await transcribeTimeline({ onProgress })
-        : await transcribeWithComfyUI(asset, { onProgress })
+        ? await transcribeTimelineAudio({ onProgress })
+        : await transcribeAsset(asset, { onProgress })
 
       const normalizedDraft = {
         ...nextDraft,
@@ -1029,16 +1276,17 @@ function CaptionWorkspace({
       setDraft(normalizedDraft)
       stashTimelineSession(normalizedDraft)
 
-      setStatusMessage(`Transcribed ${nextDraft.cues.length} caption cues via Qwen3-ASR (ComfyUI).`)
+      setStatusMessage(`Transcribed ${nextDraft.cues.length} caption cues with ${engineLabel}.`)
     } catch (transcriptionError) {
       setError(
         transcriptionError?.message
         || (isTimelineScope
-          ? 'Could not transcribe the timeline. Make sure ComfyUI is running with the Subtitle (QwenASR) node installed.'
-          : 'Could not transcribe this video. Make sure ComfyUI is running with the Subtitle (QwenASR) node installed.')
+          ? 'Could not transcribe the timeline audio.'
+          : 'Could not transcribe this video.')
       )
     } finally {
       setIsTranscribing(false)
+      setTranscribeProgress(null)
     }
   }
 
@@ -1068,46 +1316,68 @@ function CaptionWorkspace({
       // Keep the timeline setup so reopening to tweak doesn't lose the transcription.
       stashTimelineSession({ ...draft, cues: normalizedCues })
 
-      // Timeline captions aren't tied to a single source asset, so we skip the
-      // per-source sidecar & per-source `updateAsset` bookkeeping.
-      let sidecar = null
-      if (!isTimelineScope) {
-        const sidecarPayload = {
-          version: 1,
+      // Save the editable draft as a sidecar for BOTH scopes so the rendered
+      // overlay is self-describing: cues + style survive an app restart and
+      // power the Edit Captions round-trip from the timeline clip. Asset
+      // scope additionally bookmarks the sidecar on the source asset. Web
+      // mode has no sidecars — the overlay still renders.
+      // One controls snapshot, two consumers: the sidecar file and (timeline
+      // scope) the live captions clip itself — either can restore this
+      // workspace exactly, including the placement globals.
+      const styleSnapshot = {
+        presetId: selectedPreset.id,
+        accentColor,
+        textColor,
+        textStyle: globalTextStyle,
+        subtitlePosition,
+        styleControls: captionStyleControls,
+        globalVertical,
+        globalHorizontal,
+        globalMotion,
+        globalSizeScale,
+        globalVerticalOffset,
+        modelId: draft.modelId,
+      }
+      const sidecarPayload = {
+        version: 1,
+        scope: isTimelineScope ? 'timeline' : 'asset',
+        ...(isTimelineScope ? {} : {
           sourceAssetId: asset.id,
           sourceAssetName: asset.name,
           sourceAssetPath: asset.path || null,
-          presetId: selectedPreset.id,
-          accentColor,
-          textColor,
-          textStyle: globalTextStyle,
-          subtitlePosition,
-          styleControls: captionStyleControls,
-          modelId: draft.modelId,
-          transcriptText: cuesToTranscript(normalizedCues),
-          words: draft.words,
-          cues: normalizedCues,
-          audioDuration: draft.audioDuration || cueDuration,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        }
-
-        setStatusMessage('Saving editable caption draft...')
-        sidecar = await saveCaptionSidecar(currentProjectHandle, asset, sidecarPayload)
-
-        if (typeof updateAsset === 'function') {
-          updateAsset(asset.id, {
-            settings: {
-              ...(asset.settings || {}),
-              captionTranscriptPath: sidecar.path,
-              lastCaptionPresetId: selectedPreset.id,
-              lastCaptionUpdatedAt: timestamp,
-            },
-          })
-        }
+        }),
+        ...styleSnapshot,
+        transcriptText: cuesToTranscript(normalizedCues),
+        words: draft.words,
+        cues: normalizedCues,
+        audioDuration: draft.audioDuration || cueDuration,
+        createdAt: timestamp,
+        updatedAt: timestamp,
       }
 
-      setStatusMessage('Rendering animated caption overlay...')
+      let sidecar = null
+      try {
+        setStatusMessage('Saving editable caption draft...')
+        sidecar = await saveCaptionSidecar(
+          currentProjectHandle,
+          isTimelineScope ? { name: 'timeline' } : asset,
+          sidecarPayload
+        )
+      } catch (sidecarError) {
+        console.warn('Could not save the caption sidecar:', sidecarError)
+      }
+
+      if (!isTimelineScope && sidecar && typeof updateAsset === 'function') {
+        updateAsset(asset.id, {
+          settings: {
+            ...(asset.settings || {}),
+            captionTranscriptPath: sidecar.path,
+            lastCaptionPresetId: selectedPreset.id,
+            lastCaptionUpdatedAt: timestamp,
+          },
+        })
+      }
+
       const renderCues = normalizedCues.map((cue) => ({
         ...cue,
         globalOverrides: {
@@ -1122,6 +1392,33 @@ function CaptionWorkspace({
           subtitlePosition,
         },
       }))
+      // Timeline scope places LIVE captions: a synthetic clip whose cues
+      // render fresh every frame in preview and export — no baked overlay,
+      // so Generate is instant and cue edits never re-render.
+      if (isTimelineScope && placeOnTimeline) {
+        const liveClip = useTimelineStore.getState().placeLiveCaptions({
+          cues: renderCues,
+          preset: renderPreset,
+          duration: cueDuration,
+          workspace: {
+            version: 1,
+            ...styleSnapshot,
+            words: draft.words,
+            audioDuration: draft.audioDuration || cueDuration,
+            updatedAt: timestamp,
+          },
+        })
+        if (!liveClip) {
+          throw new Error('Could not place the captions clip on the timeline.')
+        }
+        // Done — close like the baked path does. The captions appearing on
+        // the timeline (clip selected, cues live in the preview) are the
+        // confirmation; a status line in a dialog we're leaving is not.
+        onClose?.()
+        return
+      }
+
+      setStatusMessage('Rendering animated caption overlay…')
       const overlayBlob = await generateCaptionVideoBlob({
         preset: renderPreset,
         cues: renderCues,
@@ -1129,7 +1426,12 @@ function CaptionWorkspace({
         height: renderSettings.height,
         duration: cueDuration,
         fps: renderSettings.fps,
+        onProgress: (percent) => {
+          setGenerateProgress(percent)
+          setStatusMessage(`Rendering animated caption overlay… ${percent}%`)
+        },
       })
+      setGenerateProgress(null)
 
       const folderId = ensureCaptionsFolder(folders, addFolder)
       const assetName = buildCaptionAssetName(asset, selectedPreset)
@@ -1209,8 +1511,111 @@ function CaptionWorkspace({
       setError(generationError?.message || 'Could not generate animated captions.')
     } finally {
       setIsGenerating(false)
+      setGenerateProgress(null)
     }
   }
+
+  const selectedCue = draft.cues.find((cue) => cue.id === selectedCueId) || null
+
+  // Engine + vocabulary controls, shared between the first-run card and the
+  // post-transcription strip. A plain render function (not a component) so the
+  // controlled vocabulary input keeps focus across re-renders.
+  const renderEngineControls = () => (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sf-dark-700 bg-sf-dark-950/60 p-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-medium text-sf-text-primary">Transcription model</div>
+          <div className="text-[11px] text-sf-text-muted">{engineStatusLine}</div>
+          {isInstallingEngine && Number.isFinite(Number(engineInstallProgress?.percent)) && (
+            <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-sf-dark-700">
+              <div
+                className="h-full rounded-full bg-sf-accent transition-[width] duration-300"
+                style={{ width: `${Math.max(2, Number(engineInstallProgress.percent))}%` }}
+              />
+            </div>
+          )}
+        </div>
+        {!captionsUseComfy && (
+          <div className="flex items-center gap-2">
+            <select
+              value={modelPreference}
+              onChange={(event) => handleModelPreferenceChange(event.target.value)}
+              disabled={busy || isInstallingEngine}
+              className="rounded-lg border border-sf-dark-600 bg-sf-dark-950 px-2 py-1.5 text-xs text-sf-text-primary focus:border-sf-accent focus:outline-none"
+            >
+              {CAPTION_MODEL_TIERS.map((tier) => (
+                <option key={tier.id} value={tier.id}>
+                  {`${tier.label} (${tier.size})${installedModelIds.has(tier.id) ? ' ✓' : ''}${tier.id === 'large-v3-turbo' ? ' · Recommended' : ''}`}
+                </option>
+              ))}
+            </select>
+            {showEngineInstall && (
+              <button
+                type="button"
+                onClick={handleInstallEngine}
+                disabled={isInstallingEngine || busy}
+                className="inline-flex items-center gap-2 rounded-lg border border-sf-accent/50 bg-sf-accent/10 px-3 py-1.5 text-xs font-medium text-sf-accent hover:bg-sf-accent/20 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isInstallingEngine ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                {isInstallingEngine
+                  ? (Number.isFinite(Number(engineInstallProgress?.percent))
+                    ? `Downloading… ${engineInstallProgress.percent}%`
+                    : 'Installing…')
+                  : `Download ${selectedTier.label} (${selectedTier.size})`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {!captionsUseComfy && canRemoveModels && removableTiers.length > 0 && !isInstallingEngine && (
+        <details className="rounded-xl border border-sf-dark-700 bg-sf-dark-950/40 px-3 py-2">
+          <summary className="cursor-pointer select-none text-[11px] text-sf-text-muted hover:text-sf-text-primary">
+            Manage models on disk…
+          </summary>
+          <div className="mt-2 space-y-1.5">
+            {removableTiers.map((tier) => (
+              <div key={tier.id} className="flex items-center gap-2 text-[11px] text-sf-text-muted">
+                <span>{tier.label} ({tier.size})</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveModel(tier.id)}
+                  disabled={busy}
+                  className="ml-auto rounded-md border border-sf-dark-600 bg-sf-dark-900 px-2 py-0.5 text-[10px] hover:border-sf-error/60 hover:text-sf-error disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      {!captionsUseComfy && (
+        <div className="rounded-xl border border-sf-dark-700 bg-sf-dark-950/60 p-3">
+          <div className="flex items-center gap-2">
+            <div className="text-xs font-medium text-sf-text-primary">Vocabulary</div>
+            <div
+              className="cursor-help text-[10px] text-sf-text-muted"
+              title="Brand names, people, jargon — helps transcription spell them right. Your project name, timeline names, and on-screen text clips are included automatically."
+            >
+              ⓘ
+            </div>
+          </div>
+          <input
+            type="text"
+            value={captionVocabulary}
+            onChange={(event) => useProjectStore.getState().updateProjectSettings({ captionVocabulary: event.target.value })}
+            placeholder="e.g. Vidwright, Seedance, ComfyUI"
+            disabled={busy}
+            className="mt-2 w-full rounded-lg border border-sf-dark-600 bg-sf-dark-950 px-2 py-1.5 text-xs text-sf-text-primary placeholder:text-sf-text-muted/60 focus:border-sf-accent focus:outline-none disabled:opacity-50"
+          />
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <div className="fixed inset-0 z-[120] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -1236,174 +1641,182 @@ function CaptionWorkspace({
           </button>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-[1.25fr_1fr] gap-0 h-[calc(92vh-72px)]">
-          <div className="border-r border-sf-dark-700 p-5 overflow-y-auto space-y-5">
-            <section className="rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-4">
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <div>
-                  <div className="text-sm font-medium text-sf-text-primary">
-                    {isTimelineScope ? 'Timeline Audio' : 'Source Video'}
-                  </div>
-                  <div className="text-xs text-sf-text-muted mt-1">
-                    {isTimelineScope
-                      ? 'Captions follow the edited program audio — trims, gaps, and mutes all honored.'
-                      : 'Select a preset, edit the cues, then save a transparent caption overlay.'}
-                  </div>
+        <div className="flex h-[calc(92vh-72px)] min-h-0 flex-col">
+          {draft.cues.length === 0 ? (
+            /* First run: one job on screen — get a transcript. Everything else
+               (cue editing, style, preview) appears once cues exist. */
+            <div className="flex-1 overflow-y-auto p-5">
+              <div className="mx-auto mt-6 w-full max-w-xl rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-6">
+                <div className="text-base font-semibold text-sf-text-primary">
+                  {isTimelineScope ? 'Transcribe your timeline' : 'Transcribe this video'}
                 </div>
+                <div className="mt-1 mb-5 text-xs text-sf-text-muted">
+                  {isTimelineScope
+                    ? 'Captions follow the edited program audio — trims, gaps, mutes, and solos all honored.'
+                    : 'Speech from this source becomes editable caption cues.'}
+                </div>
+                {!isTimelineScope && (
+                  <div className="mb-4 aspect-video overflow-hidden rounded-xl border border-sf-dark-700 bg-black">
+                    {asset.url ? (
+                      <video
+                        src={asset.url}
+                        controls
+                        className="h-full w-full bg-black object-contain"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-sm text-sf-text-muted">
+                        Preview unavailable for this asset.
+                      </div>
+                    )}
+                  </div>
+                )}
+                {renderEngineControls()}
                 <button
                   type="button"
                   onClick={handleTranscribe}
                   disabled={!canTranscribe}
-                  className="inline-flex items-center gap-2 rounded-lg bg-sf-accent px-3 py-2 text-xs font-medium text-white hover:bg-sf-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="relative overflow-hidden mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sf-accent px-4 py-2.5 text-sm font-medium text-white hover:bg-sf-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {isTranscribing ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Wand2 className="w-4 h-4" />
-                  )}
-                  {draft.cues.length > 0
-                    ? 'Re-transcribe'
-                    : (isTimelineScope ? 'Transcribe timeline' : 'Transcribe audio')}
-                </button>
-              </div>
-              {isTimelineScope ? (
-                <div className="flex items-center gap-3 rounded-xl border border-sf-dark-700 bg-sf-dark-950/60 p-3">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-sf-text-primary">Edited timeline</div>
-                    <div className="text-[11px] text-sf-text-muted truncate">
-                      {draft.cues.length > 0
-                        ? `${draft.cues.length} cues transcribed`
-                        : 'Mixed program audio, transcribed with Qwen3-ASR'}
-                    </div>
-                  </div>
-                  {asset?.duration ? (
-                    <div className="ml-auto flex-shrink-0 text-right">
-                      <div className="text-[9px] uppercase tracking-[0.12em] text-sf-text-muted">Length</div>
-                      <div className="text-sm font-mono text-sf-text-primary">{formatSeconds(asset.duration)}</div>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="aspect-video rounded-xl overflow-hidden bg-black border border-sf-dark-700">
-                  {asset.url ? (
-                    <video
-                      src={asset.url}
-                      controls
-                      className="w-full h-full object-contain bg-black"
+                  {isTranscribing && Number.isFinite(transcribeProgress) && (
+                    <span
+                      className="absolute inset-y-0 left-0 bg-white/25 transition-[width] duration-300 ease-out"
+                      style={{ width: `${transcribeProgress}%` }}
                     />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-sm text-sf-text-muted">
-                      Preview unavailable for this asset.
-                    </div>
                   )}
-                </div>
-              )}
-            </section>
-
-            <section className="rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-4">
-              <div className="text-sm font-medium text-sf-text-primary mb-3">
-                Style Presets
-              </div>
-              <div className="space-y-2">
-                {CAPTION_PRESETS.map((preset) => {
-                  const selected = preset.id === selectedPresetId
-                  const thumb = selected ? (selectedPreviewUrl || previewUrls[preset.id]) : previewUrls[preset.id]
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedPresetId(preset.id)
-                        setAccentColor(preset.keyWordColor || DEFAULT_KINETIC_ACCENT_COLOR)
-                        setTextColor(null)
-                        setGlobalTextStyle(preset.defaultTextStyle || (preset.traditional ? 'background' : 'plain'))
-                        setGlobalFontFamily(preset.fontFamily || 'Inter')
-                        setBackgroundColor('#000000')
-                        setBackgroundOpacity(65)
-                        setBackgroundPadding(preset.traditional ? 60 : 45)
-                        setBackgroundRadius(preset.traditional ? 30 : 25)
-                        setOutlineColor('#000000')
-                        setOutlineThickness(9)
-                        setShadowColor('#000000')
-                        setShadowOpacity(75)
-                        setShadowBlur(preset.traditional ? 25 : 18)
-                        setShadowDistance(5)
-                        setSubtitlePosition(preset.subtitlePosition || 'action-safe')
-                        setActiveSavedStyleId(null)
-                        setCaptionStyleName('')
-                      }}
-                      className={`w-full flex items-center gap-3 rounded-xl border p-2 text-left transition-colors ${
-                        selected
-                          ? 'border-sf-accent bg-sf-dark-800'
-                          : 'border-sf-dark-700 bg-sf-dark-900 hover:border-sf-dark-500'
-                      }`}
-                    >
-                      <div className="w-[88px] h-[50px] flex-shrink-0 rounded-lg overflow-hidden bg-sf-dark-950">
-                        {thumb ? (
-                          <img
-                            src={thumb}
-                            alt={preset.name}
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-[10px] text-sf-text-muted">
-                            {preset.name}
-                          </div>
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-sf-text-primary">{preset.name}</div>
-                        <div className="text-xs text-sf-text-muted mt-0.5 line-clamp-2">{preset.description}</div>
-                      </div>
-                    </button>
-                  )
-                })}
-                {savedCaptionStyles.length > 0 && (
-                  <div className="pt-3">
-                    <div className="mb-2 text-[10px] uppercase tracking-[0.12em] text-sf-text-muted">
-                      Saved Styles
-                    </div>
-                    <div className="space-y-2">
-                      {savedCaptionStyles.map((style) => {
-                        const selected = style.id === activeSavedStyleId
-                        return (
-                          <div
-                            key={style.id}
-                            className={`flex items-center gap-2 rounded-xl border p-2 transition-colors ${
-                              selected
-                                ? 'border-sf-accent bg-sf-dark-800'
-                                : 'border-sf-dark-700 bg-sf-dark-900 hover:border-sf-dark-500'
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => applyCaptionStyle(style)}
-                              className="min-w-0 flex-1 rounded-lg px-1 py-1 text-left"
-                            >
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-medium text-sf-text-primary">{style.name}</div>
-                                <div className="mt-0.5 truncate text-xs text-sf-text-muted">
-                                  {style.presetName || getCaptionPresetById(style.presetId)?.name || 'Caption style'}
-                                </div>
-                              </div>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => deleteSavedCaptionStyle(style.id)}
-                              className="rounded-md border border-sf-dark-600 bg-sf-dark-950 px-2 py-1 text-[10px] text-sf-text-muted hover:border-sf-error/60 hover:text-sf-error"
-                              title={`Delete ${style.name}`}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        )
-                      })}
-                    </div>
+                  <span className="relative inline-flex items-center gap-2">
+                    {isTranscribing ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Wand2 className="w-4 h-4" />
+                    )}
+                    {isTranscribing
+                      ? (Number.isFinite(transcribeProgress)
+                        ? `Transcribing… ${Math.round(transcribeProgress)}%`
+                        : 'Transcribing…')
+                      : (isTimelineScope ? 'Transcribe timeline' : 'Transcribe audio')}
+                  </span>
+                </button>
+                {isTimelineScope && (
+                  <div className="mt-3 text-center text-[11px] text-sf-text-muted">
+                    Busy mix? Solo the dialog or vocal track first for a much cleaner read.
                   </div>
                 )}
               </div>
-            </section>
-          </div>
+            </div>
+          ) : (
+            <>
+            {/* Transcription happened — collapse its controls to a strip and
+               hand the window to the result. */}
+            <div className="flex-shrink-0 border-b border-sf-dark-700 bg-sf-dark-950/60">
+              <div className="flex items-center gap-3 px-5 py-2.5">
+                <span className="h-2 w-2 flex-shrink-0 rounded-full bg-sf-success" />
+                <span className="text-xs text-sf-text-primary">
+                  Transcribed with <span className="font-medium">{captionsUseComfy ? 'ComfyUI' : selectedTier.label}</span>
+                </span>
+                <span className="text-[11px] text-sf-text-muted">
+                  {draft.cues.length} cues{asset?.duration ? ` · ${formatSeconds(asset.duration)}` : ''}
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTranscribe}
+                    disabled={!canTranscribe}
+                    className="inline-flex items-center gap-2 rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-3 py-1.5 text-xs text-sf-text-primary hover:bg-sf-dark-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isTranscribing ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    {isTranscribing && Number.isFinite(transcribeProgress)
+                      ? `Transcribing ${Math.round(transcribeProgress)}%`
+                      : 'Re-transcribe'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTranscribeDetailsOpen((v) => !v)}
+                    className="rounded-lg border border-sf-dark-600 bg-sf-dark-900 p-1.5 text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-800"
+                    title="Transcription settings — model and vocabulary"
+                  >
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${transcribeDetailsOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                </div>
+              </div>
+              {transcribeDetailsOpen && (
+                <div className="border-t border-sf-dark-700 px-5 py-3">
+                  {renderEngineControls()}
+                </div>
+              )}
+            </div>
+
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 xl:grid-cols-[1.25fr_1fr]">
+            {/* The hero: the captions themselves. */}
+            <div className="flex min-h-0 flex-col border-r border-sf-dark-700">
+              <div className="flex flex-shrink-0 items-center gap-3 border-b border-sf-dark-700 px-5 py-3">
+                <div className="text-sm font-medium text-sf-text-primary">Captions</div>
+                <div className="text-[11px] text-sf-text-muted">{cueDuration.toFixed(2)}s</div>
+                <input
+                  type="text"
+                  value={cueSearch}
+                  onChange={(event) => setCueSearch(event.target.value)}
+                  placeholder="Find in captions…"
+                  className="ml-auto w-48 rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-3 py-1.5 text-xs text-sf-text-primary placeholder:text-sf-text-muted/60 focus:border-sf-accent focus:outline-none"
+                />
+              </div>
+              <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-3">
+                {(() => {
+                  const needle = cueSearch.trim().toLowerCase()
+                  const visibleCues = needle
+                    ? draft.cues.filter((cue) => String(cue.text || '').toLowerCase().includes(needle))
+                    : draft.cues
+                  if (visibleCues.length === 0) {
+                    return (
+                      <div className="rounded-xl border border-dashed border-sf-dark-600 bg-sf-dark-950/70 px-4 py-8 text-center text-xs text-sf-text-muted">
+                        No captions match “{cueSearch.trim()}”.
+                      </div>
+                    )
+                  }
+                  return visibleCues.map((cue) => {
+                    const cueIndex = draft.cues.indexOf(cue)
+                    const selected = cue.id === selectedCueId
+                    return (
+                      <div
+                        key={cue.id}
+                        onClick={() => {
+                          setSelectedCueId(cue.id)
+                          const t = clamp(Number(cue.start) || 0, 0, previewDuration)
+                          previewTimeRef.current = t
+                          setScrubDisplay(t)
+                          if (isPreviewPlaying) setIsPreviewPlaying(false)
+                          else drawPreview(t, true)
+                        }}
+                        className={`grid w-full cursor-pointer grid-cols-[28px_64px_1fr_auto] items-center gap-2 rounded-lg border-l-2 px-2.5 py-1.5 ${
+                          selected
+                            ? 'border-sf-accent bg-sf-dark-800'
+                            : 'border-transparent hover:bg-sf-dark-800/60'
+                        }`}
+                      >
+                        <span className="text-right text-[11px] text-sf-text-muted">{cueIndex + 1}</span>
+                        <span className="font-mono text-[11px] text-sf-text-muted">{formatSeconds(cue.start)}</span>
+                        <input
+                          type="text"
+                          value={cue.text}
+                          onChange={(e) => updateCue(cue.id, 'text', e.target.value)}
+                          className="w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-sm text-sf-text-primary focus:border-sf-accent focus:bg-sf-dark-900 focus:outline-none"
+                        />
+                        <span className="font-mono text-[10px] text-sf-text-muted">
+                          {Math.max(0, (Number(cue.end) || 0) - (Number(cue.start) || 0)).toFixed(1)}s
+                        </span>
+                      </div>
+                    )
+                  })
+                })()}
+              </div>
+              <div className="flex-shrink-0 border-t border-sf-dark-700 px-5 py-2 text-[11px] text-sf-text-muted">
+                Click a cue to preview it · type in the row to edit its text · timing and placement on the right
+              </div>
+            </div>
+
 
           <div className="flex min-h-0 flex-col">
           <div className="flex-shrink-0 border-b border-sf-dark-700 bg-sf-dark-950 p-5">
@@ -1437,12 +1850,12 @@ function CaptionWorkspace({
                   </div>
                 </div>
               </div>
-              <div className="flex items-center justify-center rounded-xl bg-black border border-sf-dark-700 overflow-hidden" style={{ maxHeight: 380 }}>
-                <div className="relative" style={{ maxHeight: 380, maxWidth: '100%' }}>
+              <div className="flex items-center justify-center rounded-xl bg-black border border-sf-dark-700 overflow-hidden" style={{ maxHeight: 300 }}>
+                <div className="relative" style={{ maxHeight: 300, maxWidth: '100%' }}>
                   <canvas
                     ref={previewCanvasRef}
                     className="block"
-                    style={{ maxHeight: 380, maxWidth: '100%' }}
+                    style={{ maxHeight: 300, maxWidth: '100%' }}
                   />
                   {showTikTokOverlay && (
                     <TikTokGuideOverlay w={renderSettings.width} h={renderSettings.height} />
@@ -1500,6 +1913,72 @@ function CaptionWorkspace({
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-5 space-y-5">
+            {selectedCue && (
+              <section className="rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="text-sm font-medium text-sf-text-primary">
+                    Cue {draft.cues.indexOf(selectedCue) + 1}
+                  </div>
+                  <span className="font-mono text-[11px] text-sf-text-muted">
+                    {formatSeconds(selectedCue.start)} → {formatSeconds(selectedCue.end)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      removeCue(selectedCue.id)
+                      setSelectedCueId(null)
+                    }}
+                    className="ml-auto rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-2.5 py-1 text-[11px] text-sf-text-muted hover:border-sf-error/60 hover:text-sf-error"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[11px] text-sf-text-muted">
+                    Start
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={selectedCue.start}
+                      onChange={(e) => updateCue(selectedCue.id, 'start', e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                    />
+                  </label>
+                  <label className="text-[11px] text-sf-text-muted">
+                    End
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={selectedCue.start + 0.1}
+                      value={selectedCue.end}
+                      onChange={(e) => updateCue(selectedCue.id, 'end', e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                    />
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 gap-2">
+                  <CueOverrideChips
+                    label="Vertical"
+                    value={selectedCue.override?.verticalPlacement || 'auto'}
+                    options={CUE_VERTICAL_OPTIONS}
+                    onChange={(nextValue) => updateCueOverride(selectedCue.id, 'verticalPlacement', nextValue)}
+                  />
+                  <CueOverrideChips
+                    label="Horizontal"
+                    value={selectedCue.override?.horizontalPlacement || 'auto'}
+                    options={CUE_HORIZONTAL_OPTIONS}
+                    onChange={(nextValue) => updateCueOverride(selectedCue.id, 'horizontalPlacement', nextValue)}
+                  />
+                  <CueOverrideChips
+                    label="Motion"
+                    value={selectedCue.override?.motionProfile || 'auto'}
+                    options={CUE_MOTION_OPTIONS}
+                    onChange={(nextValue) => updateCueOverride(selectedCue.id, 'motionProfile', nextValue)}
+                  />
+                </div>
+              </section>
+            )}
             <section className="rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-4 space-y-3">
               <div>
                 <div className="text-sm font-medium text-sf-text-primary">Style</div>
@@ -1508,38 +1987,69 @@ function CaptionWorkspace({
                 </div>
               </div>
 
-              <div className="rounded-xl border border-sf-dark-700 bg-sf-dark-950/40 px-3 py-3 space-y-2">
-                <div className="text-[10px] uppercase tracking-[0.12em] text-sf-text-muted">
-                  Save Style
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <input
-                    type="text"
-                    value={captionStyleName}
-                    onChange={(event) => setCaptionStyleName(event.target.value)}
-                    placeholder="Name this caption style"
-                    className="min-w-0 flex-1 rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-3 py-2 text-sm text-sf-text-primary placeholder:text-sf-text-muted focus:border-sf-accent focus:outline-none"
-                  />
+              {/* One compact row: presets and saved styles share a dropdown.
+                  The live preview above is the real thumbnail. */}
+              <div className="flex items-center gap-2">
+                <span className="w-[64px] flex-shrink-0 text-[10px] uppercase tracking-[0.12em] text-sf-text-muted">Preset</span>
+                <select
+                  value={activeSavedStyleId ? `saved:${activeSavedStyleId}` : `preset:${selectedPresetId}`}
+                  onChange={(event) => {
+                    const raw = event.target.value
+                    if (raw.startsWith('saved:')) {
+                      const style = savedCaptionStyles.find((s) => s.id === raw.slice(6))
+                      if (style) applyCaptionStyle(style)
+                      return
+                    }
+                    const preset = getCaptionPresetById(raw.slice(7))
+                    if (!preset) return
+                    setSelectedPresetId(preset.id)
+                    setAccentColor(preset.keyWordColor || DEFAULT_KINETIC_ACCENT_COLOR)
+                    setTextColor(null)
+                    setGlobalTextStyle(preset.defaultTextStyle || (preset.traditional ? 'background' : 'plain'))
+                    setGlobalFontFamily(preset.fontFamily || 'Inter')
+                    setBackgroundColor('#000000')
+                    setBackgroundOpacity(65)
+                    setBackgroundPadding(preset.traditional ? 60 : 45)
+                    setBackgroundRadius(preset.traditional ? 30 : 25)
+                    setOutlineColor('#000000')
+                    setOutlineThickness(9)
+                    setShadowColor('#000000')
+                    setShadowOpacity(75)
+                    setShadowBlur(preset.traditional ? 25 : 18)
+                    setShadowDistance(5)
+                    setSubtitlePosition(preset.subtitlePosition || 'action-safe')
+                    setActiveSavedStyleId(null)
+                    setCaptionStyleName('')
+                  }}
+                  className="min-w-0 flex-1 rounded-lg border border-sf-dark-600 bg-sf-dark-950 px-2 py-2 text-sm text-sf-text-primary focus:border-sf-accent focus:outline-none"
+                >
+                  <optgroup label="Presets">
+                    {CAPTION_PRESETS.map((preset) => (
+                      <option key={preset.id} value={`preset:${preset.id}`}>
+                        {`${preset.name} — ${preset.description}`}
+                      </option>
+                    ))}
+                  </optgroup>
+                  {savedCaptionStyles.length > 0 && (
+                    <optgroup label="Saved styles">
+                      {savedCaptionStyles.map((style) => (
+                        <option key={style.id} value={`saved:${style.id}`}>
+                          {style.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                {activeSavedStyleId && (
                   <button
                     type="button"
-                    onClick={() => saveCurrentCaptionStyle()}
-                    className="rounded-lg bg-sf-accent px-3 py-2 text-xs font-medium text-white hover:bg-sf-accent/90"
+                    onClick={() => deleteSavedCaptionStyle(activeSavedStyleId)}
+                    className="rounded-lg border border-sf-dark-600 bg-sf-dark-900 p-2 text-sf-text-muted hover:border-sf-error/60 hover:text-sf-error"
+                    title="Delete this saved style"
                   >
-                    {activeSavedStyleId ? 'Update Style' : 'Save Style'}
+                    <X className="h-3.5 w-3.5" />
                   </button>
-                  {activeSavedStyleId && (
-                    <button
-                      type="button"
-                      onClick={() => saveCurrentCaptionStyle({ forceNew: true })}
-                      className="rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-3 py-2 text-xs font-medium text-sf-text-primary hover:bg-sf-dark-800"
-                    >
-                      Save New
-                    </button>
-                  )}
-                </div>
-                <div className="text-[11px] text-sf-text-muted">
-                  Saves the look only: preset, font, colors, background, outline, shadow, size, motion, and placement.
-                </div>
+                )}
               </div>
 
               <div className="rounded-xl border border-sf-dark-700 bg-sf-dark-950/40 px-3 py-3 space-y-3">
@@ -1812,98 +2322,37 @@ function CaptionWorkspace({
                   <span className="text-[10px] text-sf-text-muted w-8">Down</span>
                 </div>
               </div>
-            </section>
-
-            <section className="rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-4">
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <div>
-                  <div className="text-sm font-medium text-sf-text-primary">Caption Cues</div>
-                  <div className="text-xs text-sf-text-muted mt-1">
-                    Adjust the transcribed text and timing before rendering.
-                  </div>
+              {/* Save Style lives at the end: name the look after you've made it. */}
+              <div className="rounded-xl border border-sf-dark-700 bg-sf-dark-950/40 px-3 py-3 space-y-2">
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="text"
+                    value={captionStyleName}
+                    onChange={(event) => setCaptionStyleName(event.target.value)}
+                    placeholder="Save this look as…"
+                    className="min-w-0 flex-1 rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-3 py-2 text-sm text-sf-text-primary placeholder:text-sf-text-muted focus:border-sf-accent focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => saveCurrentCaptionStyle()}
+                    className="rounded-lg bg-sf-accent px-3 py-2 text-xs font-medium text-white hover:bg-sf-accent/90"
+                  >
+                    {activeSavedStyleId ? 'Update Style' : 'Save Style'}
+                  </button>
+                  {activeSavedStyleId && (
+                    <button
+                      type="button"
+                      onClick={() => saveCurrentCaptionStyle({ forceNew: true })}
+                      className="rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-3 py-2 text-xs font-medium text-sf-text-primary hover:bg-sf-dark-800"
+                    >
+                      Save New
+                    </button>
+                  )}
                 </div>
                 <div className="text-[11px] text-sf-text-muted">
-                  {draft.cues.length} cues · {cueDuration.toFixed(2)}s
+                  Saves the look only: preset, font, colors, background, outline, shadow, size, motion, and placement.
                 </div>
               </div>
-
-              {draft.cues.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-sf-dark-600 bg-sf-dark-950/70 px-4 py-8 text-center">
-                  <div className="text-sm text-sf-text-primary">No caption cues yet.</div>
-                  <div className="text-xs text-sf-text-muted mt-2">
-                    Run local transcription to generate editable caption phrases from the video audio.
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-                  {draft.cues.map((cue) => (
-                    <div
-                      key={cue.id}
-                      className="rounded-xl border border-sf-dark-700 bg-sf-dark-950/70 p-3 space-y-3"
-                    >
-                      <div className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center">
-                        <label className="text-[11px] text-sf-text-muted">
-                          Start
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            value={cue.start}
-                            onChange={(e) => updateCue(cue.id, 'start', e.target.value)}
-                            className="mt-1 w-full rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
-                          />
-                        </label>
-                        <label className="text-[11px] text-sf-text-muted">
-                          End
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={cue.start + 0.1}
-                            value={cue.end}
-                            onChange={(e) => updateCue(cue.id, 'end', e.target.value)}
-                            className="mt-1 w-full rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => removeCue(cue.id)}
-                          className="mt-5 rounded-lg border border-sf-dark-600 bg-sf-dark-900 px-2.5 py-1.5 text-[11px] text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-800"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                      <textarea
-                        value={cue.text}
-                        onChange={(e) => updateCue(cue.id, 'text', e.target.value)}
-                        className="w-full h-20 rounded-xl border border-sf-dark-600 bg-sf-dark-900 px-3 py-2 text-sm text-sf-text-primary resize-none focus:outline-none focus:border-sf-accent"
-                      />
-                      <div className="grid grid-cols-1 gap-2">
-                        <CueOverrideChips
-                          label="Vertical"
-                          value={cue.override?.verticalPlacement || 'auto'}
-                          options={CUE_VERTICAL_OPTIONS}
-                          onChange={(nextValue) => updateCueOverride(cue.id, 'verticalPlacement', nextValue)}
-                        />
-                        <CueOverrideChips
-                          label="Horizontal"
-                          value={cue.override?.horizontalPlacement || 'auto'}
-                          options={CUE_HORIZONTAL_OPTIONS}
-                          onChange={(nextValue) => updateCueOverride(cue.id, 'horizontalPlacement', nextValue)}
-                        />
-                        <CueOverrideChips
-                          label="Motion"
-                          value={cue.override?.motionProfile || 'auto'}
-                          options={CUE_MOTION_OPTIONS}
-                          onChange={(nextValue) => updateCueOverride(cue.id, 'motionProfile', nextValue)}
-                        />
-                      </div>
-                      <div className="text-[11px] text-sf-text-muted">
-                        {formatSeconds(cue.start)} → {formatSeconds(cue.end)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </section>
 
             <section className="rounded-2xl border border-sf-dark-700 bg-sf-dark-900/60 p-4 space-y-3">
@@ -1923,6 +2372,10 @@ function CaptionWorkspace({
             </section>
 
           </div>
+          </div>
+          </div>
+            </>
+          )}
 
           <div className="flex-shrink-0 border-t border-sf-dark-700 px-5 py-4 flex items-start justify-between gap-3">
             {(statusMessage || error) ? (
@@ -2024,17 +2477,28 @@ function CaptionWorkspace({
                 type="button"
                 onClick={handleGenerate}
                 disabled={!canGenerate}
-                className="inline-flex items-center gap-2 rounded-xl bg-sf-accent px-4 py-2 text-sm font-medium text-white hover:bg-sf-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="relative overflow-hidden inline-flex items-center gap-2 rounded-xl bg-sf-accent px-4 py-2 text-sm font-medium text-white hover:bg-sf-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isGenerating ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Sparkles className="w-4 h-4" />
+                {isGenerating && Number.isFinite(generateProgress) && (
+                  <span
+                    className="absolute inset-y-0 left-0 bg-white/25 transition-[width] duration-300 ease-out"
+                    style={{ width: `${generateProgress}%` }}
+                  />
                 )}
-                Generate 1 video with captions
+                <span className="relative inline-flex items-center gap-2">
+                  {isGenerating ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  {isGenerating
+                    ? (Number.isFinite(generateProgress)
+                      ? `Rendering… ${Math.round(generateProgress)}%`
+                      : 'Generating…')
+                    : 'Generate captions'}
+                </span>
               </button>
             </div>
-          </div>
           </div>
         </div>
       </div>

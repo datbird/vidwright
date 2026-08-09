@@ -45,13 +45,27 @@ function clamp(value, min, max) {
 }
 
 function clipHasUsableAudio(clip, asset) {
+  // Audio-track clips only — the same audibility model as playback
+  // (AudioLayerRenderer) and export (export:mixAudio). Video clips are
+  // picture-only everywhere else in the app, so captions must not hear
+  // audio the user cannot: video-embedded audio joins the mix by living
+  // on an audio track.
+  //
+  // The remaining checks must stay in EXACT parity with the main-process
+  // mixer's filter (captions:mixTimelineAudio): if this preflight says
+  // "audible" while the main mixer says "nothing to mix", the FFmpeg path
+  // errors and the Web Audio fallback tries to decode whole media files in
+  // renderer memory — which crashes the renderer on video-backed clips.
+  // asset.audioEnabled is deliberately NOT checked: it is the video-clip
+  // embedded-audio toggle, and playback (AudioLayerRenderer) ignores it for
+  // audio-track clips — dropping a file onto an audio track is an explicit
+  // request to hear it. hasAudio === false stays (the file factually has no
+  // audio stream), as do clip-level mute and reverse.
   if (!asset) return false
-  if (clip.type === 'audio') return true
-  if (clip.type !== 'video') return false
+  if (clip.type !== 'audio') return false
   if (asset.hasAudio === false) return false
-  if (asset.audioEnabled === false) return false
-  // Clip-level audio mute overrides asset level.
   if (clip.audioEnabled === false) return false
+  if (clip.reverse) return false
   return true
 }
 
@@ -174,6 +188,13 @@ async function mixViaFFmpeg({ duration, report }) {
     }
   } catch (err) {
     if (heartbeat) clearInterval(heartbeat)
+    // "No audible clips" is a verdict about the timeline, not an FFmpeg
+    // infrastructure failure — retrying in the Web Audio fallback would just
+    // second-guess the mixer (and decoding whole media files in renderer
+    // memory can crash the renderer). Let it surface to the user as-is.
+    if (/no audible clips/i.test(String(err?.message || ''))) {
+      throw err
+    }
     console.warn('[timelineAudioMix] FFmpeg path failed, falling back to Web Audio:', err)
     return null
   }
@@ -202,16 +223,15 @@ async function mixViaWebAudio({ report }) {
   const trackById = new Map(tracks.map((t) => [t.id, t]))
   const anySolo = hasAudioSolo(tracks)
   const audibleClips = enabledClips.filter((clip) => {
+    if (clip.type !== 'audio') return false
     const track = trackById.get(clip.trackId)
-    if (!track) return false
-    if (track.type === 'audio' && !isAudioTrackAudible(track, anySolo)) return false
-    if (track.type !== 'audio' && (track.muted || track.visible === false)) return false
+    if (!track || track.type !== 'audio' || !isAudioTrackAudible(track, anySolo)) return false
     const asset = assetsState.getAssetById(clip.assetId)
     return clipHasUsableAudio(clip, asset)
   })
 
   if (audibleClips.length === 0) {
-    throw new Error('No audible clips on the timeline — unmute a track or enable a clip\'s audio.')
+    throw new Error('No audible clips on audio tracks — captions transcribe the same mix you hear. Unmute or solo an audio track, or add the audio to an audio track first.')
   }
 
   const rawDuration = computeProgramDuration(enabledClips)
@@ -360,16 +380,15 @@ export async function mixTimelineAudioToWav({ onProgress } = {}) {
   }
   const trackById = new Map(tracks.map((t) => [t.id, t]))
   const anySolo = hasAudioSolo(tracks)
-  const hasAudibleClip = enabledClips.some((clip) => {
+  const audibleClips = enabledClips.filter((clip) => {
+    if (clip.type !== 'audio') return false
     const track = trackById.get(clip.trackId)
-    if (!track) return false
-    if (track.type === 'audio' && !isAudioTrackAudible(track, anySolo)) return false
-    if (track.type !== 'audio' && (track.muted || track.visible === false)) return false
+    if (!track || track.type !== 'audio' || !isAudioTrackAudible(track, anySolo)) return false
     const asset = assetsState.getAssetById(clip.assetId)
     return clipHasUsableAudio(clip, asset)
   })
-  if (!hasAudibleClip) {
-    throw new Error('No audible clips on the timeline — unmute a track or enable a clip\'s audio.')
+  if (audibleClips.length === 0) {
+    throw new Error('No audible clips on audio tracks — captions transcribe the same mix you hear. Unmute or solo an audio track, or add the audio to an audio track first.')
   }
 
   const rawDuration = computeProgramDuration(enabledClips)
@@ -381,8 +400,35 @@ export async function mixTimelineAudioToWav({ onProgress } = {}) {
     console.warn(`[timelineAudioMix] Truncating transcription to ${MAX_TRANSCRIBE_SECONDS}s (timeline is ${rawDuration.toFixed(1)}s)`)
   }
 
-  const ffmpegResult = await mixViaFFmpeg({ duration, report })
-  if (ffmpegResult) return ffmpegResult
+  // Timeline ranges that structurally contain audio. The transcription
+  // pipeline snaps whisper's words into these — generated silence between
+  // and around clips cannot contain words, no matter what the engine's
+  // timestamps claim.
+  const audibleSpans = computeAudibleSpans(audibleClips, duration)
 
-  return mixViaWebAudio({ report })
+  const ffmpegResult = await mixViaFFmpeg({ duration, report })
+  if (ffmpegResult) return { ...ffmpegResult, audibleSpans }
+
+  return { ...(await mixViaWebAudio({ report })), audibleSpans }
+}
+
+function computeAudibleSpans(clips, programDuration) {
+  const spans = clips
+    .map((clip) => {
+      const start = Math.max(0, Number(clip.startTime) || 0)
+      const end = Math.min(programDuration, start + Math.max(0, Number(clip.duration) || 0))
+      return { start, end }
+    })
+    .filter((span) => span.end > span.start)
+    .sort((a, b) => a.start - b.start)
+  const merged = []
+  for (const span of spans) {
+    const last = merged[merged.length - 1]
+    if (last && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end)
+    } else {
+      merged.push(span)
+    }
+  }
+  return merged
 }

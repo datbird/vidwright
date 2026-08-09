@@ -1,14 +1,20 @@
 import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
 import useProjectStore from '../stores/projectStore'
-import { getAnimatedTransform, getAnimatedAdjustmentSettings, getAnimatedTextProperties, getAnimatedShapeProperties } from '../utils/keyframes'
+import { getAnimatedTransform, getAnimatedAdjustmentSettings, getAnimatedTextProperties, getAnimatedShapeProperties, getAnimatedShapeMask } from '../utils/keyframes'
 import {
   applyAdjustmentSettingsToImageData,
   buildCssFilterFromAdjustments,
   hasAdjustmentEffect,
   hasTonalAdjustmentEffect,
+  hasTransformingAdjustmentTransform,
+  needsAdvancedColorPass,
   normalizeAdjustmentSettings,
 } from '../utils/adjustments'
+import { loadLutLibrary } from './lutLibrary'
+import { getShapeMaskCanvases, getShapeMaskSignature } from '../utils/shapeMask'
+import { getRenderAdjustments, getRenderEffects, isClipBypassed } from '../utils/clipBypass'
+import { drawLiveCaptionsFrame } from '../utils/captionRenderer'
 import { getAudioClipFadeGain, getAudioClipFadeValues } from '../utils/audioClipFades'
 import { getAudioClipLinearGain, normalizeAudioClipGainDb } from '../utils/audioClipGain'
 import { clampTrackVolume, hasAudioSolo, isAudioTrackAudible, trackPanToStereoPosition, trackVolumeToLinearGain } from '../utils/audioTrackAudibility'
@@ -36,10 +42,18 @@ import { hasActiveCornerPin, applyCornerPinToQuad } from '../utils/cornerPin'
 import { drawShape, getShapeCanvasRect } from '../utils/shapes'
 import { getMotionBlurSamples, getVelocityMotionBlurOptions } from '../utils/motionBlur'
 import { applyVelocityMotionBlurToCanvas, buildVelocityBlurUniformValues, canUseVelocityMotionBlur } from '../utils/velocityMotionBlur'
-import { createClipFrameCursor, getFrameSourceStats, isWebCodecsExportEnabled, resetFrameSourceStats } from './exportFrameSource'
+import {
+  createClipFrameCursor,
+  getFrameSourceStats,
+  getWebCodecsExportFallbackReason,
+  isWebCodecsExportEnabled,
+  needsWebCodecsSourcePreparation,
+  resetFrameSourceStats,
+} from './exportFrameSource'
 import { applyTransitionClip, getFadeOverlayInfo, getTransitionCanvasStyle } from '../utils/transitionStyles'
 import { isFullBakeFresh } from '../utils/clipBakeSignature'
 import { createGpuCompositor, isGpuExportEnabled } from './gpuCompositor'
+import { isAbsoluteRecordedPath } from './assetRelinkFallback'
 
 const DEFAULT_SAMPLE_RATE = 44100
 const AUDIO_FETCH_TIMEOUT_MS = 15000
@@ -62,6 +76,16 @@ const getLocalStorageFlag = (key) => {
     return typeof localStorage !== 'undefined' && localStorage.getItem(key) === '1'
   } catch {
     return false
+  }
+}
+
+// Kill switch: localStorage 'vidwright-export-pipeline' = '0' restores
+// lockstep pipe writes and synchronous GPU readback.
+const isExportPipelineEnabled = () => {
+  try {
+    return typeof localStorage === 'undefined' || localStorage.getItem('vidwright-export-pipeline') !== '0'
+  } catch {
+    return true
   }
 }
 
@@ -123,23 +147,74 @@ const yieldToMain = () => new Promise(resolve => {
   requestAnimationFrame(resolve)
 })
 
-/** Stronger yield: give the event loop a full time slice (helps prevent renderer crash under heavy export) */
-const yieldToEventLoop = () => new Promise(resolve => setTimeout(resolve, 0))
+/**
+ * Stronger yield: a full event-loop task boundary (helps prevent renderer
+ * crash under heavy export — tasks already queued, like decoder outputs and
+ * IPC responses, run before the promise resolves). MessageChannel instead
+ * of setTimeout(0) because consecutive zero-delay timers are clamped to
+ * ~4ms in a hot loop.
+ */
+const yieldTaskQueue = []
+let yieldPostPort = null
+const yieldToEventLoop = () => {
+  if (typeof MessageChannel === 'undefined') {
+    return new Promise(resolve => setTimeout(resolve, 0))
+  }
+  if (!yieldPostPort) {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = () => yieldTaskQueue.shift()?.()
+    yieldPostPort = channel.port2
+  }
+  return new Promise((resolve) => {
+    yieldTaskQueue.push(resolve)
+    yieldPostPort.postMessage(null)
+  })
+}
 
 const isElectron = () => typeof window !== 'undefined' && window.electronAPI != null
 
 /** Resolve asset to a stable file:// URL for export when in Electron to avoid blob URL invalidation / OOM */
 async function getExportAssetUrl(asset, projectHandle) {
   if (!asset?.url) return null
-  if (isElectron() && projectHandle && asset.path) {
+  if (isElectron() && asset.absolutePath) {
     try {
-      const filePath = await window.electronAPI.pathJoin(projectHandle, asset.path)
+      return await window.electronAPI.getFileUrlDirect(asset.absolutePath)
+    } catch (e) {
+      console.warn('Export: could not resolve absolute file URL for asset:', asset.name, e)
+    }
+  }
+  if (isElectron() && asset.path) {
+    try {
+      const filePath = isAbsoluteRecordedPath(asset.path)
+        ? asset.path
+        : projectHandle
+          ? await window.electronAPI.pathJoin(projectHandle, asset.path)
+          : null
+      if (!filePath) return asset.url
       return await window.electronAPI.getFileUrlDirect(filePath)
     } catch (e) {
       console.warn('Export: could not resolve file URL for asset, using blob:', asset.name, e)
     }
   }
   return asset.url
+}
+
+async function getExportAssetPath(asset, projectHandle) {
+  if (!isElectron() || !asset) return null
+  if (typeof asset.absolutePath === 'string' && asset.absolutePath.trim()) {
+    return asset.absolutePath
+  }
+  if (asset.path) {
+    try {
+      if (isAbsoluteRecordedPath(asset.path)) return asset.path
+      if (typeof projectHandle === 'string') {
+        return await window.electronAPI.pathJoin(projectHandle, asset.path)
+      }
+    } catch (err) {
+      console.warn('Export: could not resolve local asset path:', asset.name, err)
+    }
+  }
+  return null
 }
 
 async function getExportProxyUrl(asset, projectHandle) {
@@ -450,7 +525,9 @@ export const applyClipCrop = (ctx, rect, transform) => {
   const top = rect.height * (cropTop / 100)
   const bottom = rect.height * (cropBottom / 100)
   ctx.beginPath()
-  ctx.rect(left, top, rect.width - left - right, rect.height - top - bottom)
+  // Opposing crops can sum past 100%: a negative-size ctx.rect traces the
+  // rectangle inverted, which would UN-crop a slice instead of hiding all.
+  ctx.rect(left, top, Math.max(0, rect.width - left - right), Math.max(0, rect.height - top - bottom))
   ctx.clip()
 }
 
@@ -717,7 +794,7 @@ export const drawPerspectiveClipSource = (ctx, source, rect, transform = {}, tra
 
 const hasManagedPixelOrVignetteEffect = (clip, clipTime) => {
   if (!clip) return false
-  const effects = clip.effects || []
+  const effects = getRenderEffects(clip)
   return hasPixelFilterEffect(effects, clipTime)
     || hasGlslEffect(effects)
     || hasVignetteEffect(effects, clipTime)
@@ -733,7 +810,7 @@ const hasManagedPixelOrVignetteEffect = (clip, clipTime) => {
  */
 const applyClipManagedEffectsToOffCanvas = (offCanvas, offCtx, width, height, clip, clipTime, frameIndex, glslQualityScale = 1) => {
   if (!clip) return
-  const effects = clip.effects || []
+  const effects = getRenderEffects(clip)
   // Channel shifts, sharpening, grain, and analog damage are ImageData passes.
   // Glow stays separate because it needs canvas blur + screen blending.
   const hasImageDataEffects = effects.some((e) => (
@@ -943,10 +1020,100 @@ const getPreSeekSourceTime = (clip, timelineTime, usingCached) => {
   return Math.max(0, Math.min(rawSourceTime, Math.max(0, maxSourceTime - 0.001)))
 }
 
+// ---------------------------------------------------------------------------
+// Audio mix payload builders — shared by the audio-only export, the
+// pre-render audio validation, and the full export's mix call. One source of
+// truth on purpose: if the payload the validator checks ever drifted from the
+// payload the mix receives, the fail-fast would approve exports the real mix
+// then breaks.
+const serializeAudioClipForMix = (clip) => ({
+  id: clip.id,
+  assetId: clip.assetId,
+  trackId: clip.trackId,
+  type: clip.type,
+  startTime: clip.startTime,
+  duration: clip.duration,
+  trimStart: clip.trimStart || 0,
+  sourceTimeScale: clip.sourceTimeScale,
+  timelineFps: clip.timelineFps,
+  sourceFps: clip.sourceFps,
+  speed: clip.speed,
+  reverse: clip.reverse,
+  gainDb: normalizeAudioClipGainDb(clip.gainDb),
+  fadeIn: clip.fadeIn ?? 0,
+  fadeOut: clip.fadeOut ?? 0,
+  url: clip.url || null,
+})
+
+const serializeAudioAssetsForMix = (assets) => (assets || []).map(asset => ({
+  id: asset.id,
+  type: asset.type,
+  name: asset.name || null,
+  path: asset.path || null,
+  url: asset.url || null,
+}))
+
+const serializeAudioTracksForMix = (tracks) => (tracks || [])
+  .filter(track => track.type === 'audio')
+  .map(track => ({
+    id: track.id,
+    type: track.type,
+    muted: !!track.muted,
+    visible: track.visible !== false,
+    channels: track.channels || 'stereo',
+    volume: track.volume ?? 100,
+    pan: track.pan ?? 0,
+  }))
+
+const countExpectedAudioMixClips = (clips, rangeStart, rangeEnd) => clips.filter((clip) => {
+  if (clip.reverse) return false // Reverse audio is intentionally silent.
+  const clipStart = Number(clip.startTime) || 0
+  const clipDuration = Math.max(0, Number(clip.duration) || 0)
+  return clipDuration > 0 && clipStart < rangeEnd && clipStart + clipDuration > rangeStart
+}).length
+
+const collectEligibleAudioMix = (timelineState) => {
+  const audioClips = timelineState.clips.filter(clip => clip.type === 'audio' && clip.enabled !== false)
+  const anyAudioSolo = hasAudioSolo(timelineState.tracks)
+  const activeTracks = timelineState.tracks.filter(t => t.type === 'audio' && isAudioTrackAudible(t, anyAudioSolo))
+  const activeTrackIds = new Set(activeTracks.map(track => track.id))
+  const eligibleAudioClips = audioClips.filter(clip => activeTrackIds.has(clip.trackId))
+  return { audioClips, activeTracks, eligibleAudioClips }
+}
+
+// Human-readable verdict for clips the FFmpeg mix dropped. Only `problem`
+// skips are listed — a reversed or out-of-range clip is expected to be
+// absent. "Audio mix included 38 of 50 clips" cost a real user a support
+// session; file names make the fix self-serve.
+const AUDIO_MIX_SKIP_LABELS = {
+  'file-not-found': 'file not found — relink or restore it',
+  'missing-asset-record': 'asset record missing from the project',
+  'track-not-audible': 'track state disagreement',
+  'invalid-time-scale': 'invalid speed/time scale',
+  'zero-source-duration': 'no source audio in range',
+}
+const formatAudioMixDropError = (skipped, includedCount, expectedCount) => {
+  const problems = (Array.isArray(skipped) ? skipped : []).filter(entry => entry?.problem)
+  const grouped = new Map()
+  for (const entry of problems) {
+    const label = AUDIO_MIX_SKIP_LABELS[entry.reason] || entry.reason
+    const key = `${entry.assetName || 'unknown clip'} (${label})`
+    grouped.set(key, (grouped.get(key) || 0) + 1)
+  }
+  const details = Array.from(grouped.entries())
+    .map(([key, count]) => (count > 1 ? `${count} clips of ${key}` : key))
+  const head = `Audio mix included ${includedCount} of ${expectedCount} clips.`
+  if (details.length === 0) return head
+  return `${head} Dropped: ${details.join('; ')}`
+}
+
 export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   const timelineState = useTimelineStore.getState()
   const assetsState = useAssetsStore.getState()
   const projectState = useProjectStore.getState()
+  // LUT grades read the in-memory library synchronously mid-frame; make sure
+  // it is primed before the first frame composites (no-op after first load).
+  await loadLutLibrary()
   
   const {
     fps = 24,
@@ -1043,7 +1210,10 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   const framesFolder = await window.electronAPI.pathJoin(tempFolder, 'frames')
   await window.electronAPI.createDirectory(framesFolder)
   
-  const outputExtension = format === 'webm' ? 'webm' : (format === 'prores' ? 'mov' : 'mp4')
+  const audioOnlyExport = format === 'audio'
+  const outputExtension = audioOnlyExport
+    ? (audioCodec === 'mp3' ? 'mp3' : (audioCodec === 'wav' ? 'wav' : 'm4a'))
+    : (format === 'webm' ? 'webm' : (format === 'prores' ? 'mov' : 'mp4'))
   let outputPath = options.outputPath
   if (!outputPath) {
     const defaultOutputPath = await window.electronAPI.pathJoin(
@@ -1064,6 +1234,95 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   }
   const framePattern = await window.electronAPI.pathJoin(framesFolder, 'frame_%06d.png')
   const audioPath = await window.electronAPI.pathJoin(tempFolder, 'audio.wav')
+
+  // ---- Audio-only export: the exact program mix a video export bakes in,
+  // written straight to an audio file. No canvas, no frame pipe — a timeline
+  // whose video takes an hour to render delivers its audio in about a minute.
+  if (audioOnlyExport) {
+    const audioStartTime = Date.now()
+    const updateAudioStatus = (message, progress) => {
+      const elapsed = ((Date.now() - audioStartTime) / 1000).toFixed(1)
+      onProgress({ status: `Mixing audio (${elapsed}s) • ${message}`, progress })
+    }
+    try {
+      if (!window.electronAPI?.mixAudio) {
+        throw new Error('Audio-only export requires the desktop app.')
+      }
+      const { audioClips, activeTracks, eligibleAudioClips } = collectEligibleAudioMix(timelineState)
+      if (audioClips.length === 0 || activeTracks.length === 0 || eligibleAudioClips.length === 0) {
+        throw new Error('No audible audio clips to export — unmute or solo an audio track first.')
+      }
+      const expectedMixClipCount = countExpectedAudioMixClips(eligibleAudioClips, rangeStart, rangeEnd)
+      if (expectedMixClipCount === 0) {
+        throw new Error('No audio clips inside the export range.')
+      }
+      // Mixer insert effects (EQ etc.) run through the stem path, which is
+      // not wired into this branch yet. Refuse loudly rather than deliver
+      // audio that does not match playback.
+      const enabledMasterInserts = getEnabledAudioInserts(timelineState.masterAudioInserts)
+      const anyInsertEffects = enabledMasterInserts.length > 0
+        || activeTracks.some(track => hasEnabledAudioInserts(track.inserts))
+      if (anyInsertEffects) {
+        throw new Error('Audio-only export does not support mixer insert effects yet — bypass them or use a video export.')
+      }
+
+      const masterAudioGain = clampTrackVolume(timelineState.masterAudioVolume) / 100
+      const wavIsFinal = outputExtension === 'wav' && !normalizeAudio
+      const mixTarget = wavIsFinal ? outputPath : audioPath
+      updateAudioStatus('Preparing FFmpeg audio mix…', 10)
+      const mixResult = await window.electronAPI.mixAudio({
+        projectPath: projectState.currentProjectHandle,
+        outputPath: mixTarget,
+        rangeStart,
+        rangeEnd,
+        sampleRate: audioSampleRate || DEFAULT_SAMPLE_RATE,
+        channels: audioChannels || 2,
+        masterVolume: masterAudioGain * 100,
+        timeoutMs: AUDIO_MIX_TIMEOUT_MS,
+        clips: eligibleAudioClips.map(serializeAudioClipForMix),
+        tracks: serializeAudioTracksForMix(timelineState.tracks),
+        assets: serializeAudioAssetsForMix(assetsState.assets),
+      })
+      console.log('[audio-mix] FFmpeg result', JSON.stringify(mixResult))
+      if (!mixResult?.success) {
+        throw new Error(mixResult?.error || 'FFmpeg audio mix failed')
+      }
+      if (mixResult.clipCount !== expectedMixClipCount) {
+        throw new Error(formatAudioMixDropError(mixResult.skipped, mixResult.clipCount || 0, expectedMixClipCount))
+      }
+      if (!wavIsFinal) {
+        updateAudioStatus(`Encoding ${outputExtension.toUpperCase()}…`, 80)
+        const encodeResult = await window.electronAPI.encodeAudioFile({
+          inputPath: mixTarget,
+          outputPath,
+          audioCodec: outputExtension === 'mp3' ? 'mp3' : (outputExtension === 'wav' ? 'wav' : 'aac'),
+          audioBitrateKbps,
+          audioSampleRate: audioSampleRate || DEFAULT_SAMPLE_RATE,
+          audioChannels: audioChannels || 2,
+          normalizeAudio,
+          loudnessTarget,
+        })
+        if (!encodeResult?.success) {
+          throw new Error(encodeResult?.error || 'Audio encode failed')
+        }
+      }
+      onProgress({ status: EXPORT_STATUS.done, progress: 100 })
+      return {
+        outputPath,
+        encoderUsed: outputExtension,
+        hardwareFallback: false,
+        frameSources: null,
+        perf: null,
+      }
+    } finally {
+      try {
+        await window.electronAPI.deleteDirectory(tempFolder, { recursive: true })
+      } catch (err) {
+        console.warn('Failed to clean export temp folder:', err)
+      }
+    }
+  }
+
   const canUseDirectFramePipe = Boolean(
     useDirectFramePipe
     && window.electronAPI?.startFramePipe
@@ -1074,8 +1333,40 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   const pipedVideoPath = canUseDirectFramePipe && includeAudio
     ? await window.electronAPI.pathJoin(tempFolder, `video_only.${outputExtension}`)
     : outputPath
+
+  // Fail fast: validate the audio mix inputs BEFORE rendering any frames.
+  // The dropped-clip class of failure (missing or unlinked files) is
+  // knowable in milliseconds; discovering it after the frame render wasted
+  // 95 minutes on a real user's hour-long timeline. validateOnly runs the
+  // mixer's exact per-clip filter without touching FFmpeg.
+  if (includeAudio && window.electronAPI?.mixAudio) {
+    const { audioClips, activeTracks, eligibleAudioClips } = collectEligibleAudioMix(timelineState)
+    if (audioClips.length > 0 && activeTracks.length > 0 && eligibleAudioClips.length > 0) {
+      const expectedMixClipCount = countExpectedAudioMixClips(eligibleAudioClips, rangeStart, rangeEnd)
+      if (expectedMixClipCount > 0) {
+        onProgress({ status: 'Checking audio sources...', progress: 3 })
+        const audioCheck = await window.electronAPI.mixAudio({
+          validateOnly: true,
+          projectPath: projectState.currentProjectHandle,
+          rangeStart,
+          rangeEnd,
+          clips: eligibleAudioClips.map(serializeAudioClipForMix),
+          tracks: serializeAudioTracksForMix(timelineState.tracks),
+          assets: serializeAudioAssetsForMix(assetsState.assets),
+        })
+        // An older main process without validateOnly answers with a mix
+        // error about the missing output path — only act on a clean
+        // validation verdict and let the real mix decide otherwise.
+        if (audioCheck?.success && audioCheck.validateOnly && audioCheck.clipCount !== expectedMixClipCount) {
+          throw new Error(formatAudioMixDropError(audioCheck.skipped, audioCheck.clipCount || 0, expectedMixClipCount))
+        }
+      }
+    }
+  }
+
   let framePipeSessionId = null
   let framePipeEncoderUsed = null
+  let framePipeHardwareFallback = null
   
   onProgress({ status: EXPORT_STATUS.preparing, progress: 2 })
   
@@ -1094,10 +1385,12 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   
   const videoElements = new Map()
   const failedVideoSources = new Set()
+  const failedVideoSourceNames = new Map()
   const imageElements = new Map()
   const maskElements = new Map()
   const maskRenderBuffers = new Map()
   const cachedVideoSources = new Map()
+  const webCodecsEnabled = isWebCodecsExportEnabled()
 
   const applyAdvancedAdjustmentsToCanvas = (sourceCanvas, settings, extraBlurPx = null) => {
     const normalizedSettings = normalizeAdjustmentSettings(settings)
@@ -1157,6 +1450,7 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   
   const projectHandle = projectState.currentProjectHandle
   const resolvedAssetUrls = new Map()
+  const resolvedVideoInputPaths = new Map()
   for (const clip of [...videoClips, ...imageClips]) {
     const overrideUrl = cachedVideoSources.get(clip.id) || null
     const asset = assetsState.getAssetById(clip.assetId)
@@ -1171,6 +1465,19 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
     if (clip.type === 'video' || overrideUrl) {
       const sourceUrl = overrideUrl || resolvedUrl
       if (!sourceUrl) continue
+      if (!overrideUrl && !resolvedVideoInputPaths.has(sourceUrl)) {
+        let inputPath = null
+        if (proxyUrl && asset?.proxyPath) {
+          try {
+            inputPath = await window.electronAPI.pathJoin(projectHandle, asset.proxyPath)
+          } catch (err) {
+            console.warn('Export: could not resolve local proxy path:', asset.name, err)
+          }
+        } else {
+          inputPath = await getExportAssetPath(asset, projectHandle)
+        }
+        if (inputPath) resolvedVideoInputPaths.set(sourceUrl, inputPath)
+      }
       if (!videoElements.has(sourceUrl) && !failedVideoSources.has(sourceUrl)) {
         try {
           const video = await loadVideo(sourceUrl)
@@ -1180,7 +1487,11 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
           videoElements.set(sourceUrl, video)
         } catch (err) {
           failedVideoSources.add(sourceUrl)
-          console.warn('[Export] Skipping undecodable video source:', sourceUrl, getMediaErrorMessage(err))
+          failedVideoSourceNames.set(sourceUrl, {
+            name: asset?.name || sourceUrl,
+            reason: getMediaErrorMessage(err),
+          })
+          console.warn('[Export] Undecodable video source:', sourceUrl, getMediaErrorMessage(err))
         }
       }
     } else if (clip.type === 'image') {
@@ -1189,22 +1500,193 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       }
     }
   }
+
+  // Long sources and clips with deep source in-points need one extra safety
+  // step before the sequential decoder can use them. The main process first
+  // checks whether the movie index is already at the front; when it is not,
+  // FFmpeg makes a temporary video-only stream copy with no quality loss.
+  // Preparation is per source (not per clip), and any failure keeps the
+  // conservative video-element path available.
+  const preparedFrameSourceUrls = new Map()
+  const sourcePreparation = { candidates: 0, reused: 0, remuxed: 0, transcoded: 0, failed: 0 }
+  if (webCodecsEnabled && window.electronAPI?.prepareVideoSourceForExport) {
+    const candidates = new Map()
+    for (const clip of videoClips) {
+      if (clip.type !== 'video' || clip.reverse || cachedVideoSources.has(clip.id)) continue
+      const sourceUrl = resolvedAssetUrls.get(clip.assetId)
+      const sourceVideo = sourceUrl ? videoElements.get(sourceUrl) : null
+      if (!sourceUrl || !sourceVideo || candidates.has(sourceUrl)) continue
+      const cursorStartTime = Math.max(0, (Number(clip.trimStart) || 0) - 1.5)
+      const needsPreparation = needsWebCodecsSourcePreparation({
+        sourceDuration: sourceVideo.duration,
+        startTime: cursorStartTime,
+      })
+      if (!needsPreparation) continue
+      const asset = assetsState.getAssetById(clip.assetId)
+      candidates.set(sourceUrl, {
+        sourceUrl,
+        inputPath: resolvedVideoInputPaths.get(sourceUrl) || null,
+        sourceName: asset?.name || `clip ${clip.id}`,
+        mode: 'remux',
+      })
+    }
+
+    // Sources the renderer cannot decode at all (ProRes, DNx, ...) become
+    // transcode candidates: a one-time visually-transparent H.264
+    // intermediate in the export temp folder stands in for them. This
+    // overrides a long-source remux candidacy — a stream copy of an
+    // undecodable codec would still be undecodable.
+    for (const clip of videoClips) {
+      if (clip.type !== 'video' || cachedVideoSources.has(clip.id)) continue
+      const sourceUrl = resolvedAssetUrls.get(clip.assetId)
+      if (!sourceUrl || !failedVideoSourceNames.has(sourceUrl)) continue
+      if (candidates.get(sourceUrl)?.mode === 'transcode') continue
+      const asset = assetsState.getAssetById(clip.assetId)
+      candidates.set(sourceUrl, {
+        sourceUrl,
+        inputPath: resolvedVideoInputPaths.get(sourceUrl) || null,
+        sourceName: asset?.name || `clip ${clip.id}`,
+        mode: 'transcode',
+      })
+    }
+
+    sourcePreparation.candidates = candidates.size
+    let sourceIndex = 0
+    for (const candidate of candidates.values()) {
+      sourceIndex += 1
+      throwIfCancelled()
+      if (!candidate.inputPath) {
+        sourcePreparation.failed += 1
+        console.warn(`[Export] Cannot prepare ${candidate.sourceName}: no local source path is available`)
+        continue
+      }
+
+      onProgress({
+        status: `Preparing source ${sourceIndex}/${candidates.size}: ${candidate.sourceName}`,
+        progress: 3,
+      })
+      const preparedPath = await window.electronAPI.pathJoin(tempFolder, `prepared_source_${sourceIndex}.mp4`)
+      let result = null
+      try {
+        result = await window.electronAPI.prepareVideoSourceForExport({
+          inputPath: candidate.inputPath,
+          outputPath: preparedPath,
+          mode: candidate.mode || 'remux',
+        })
+      } catch (err) {
+        result = { success: false, error: getMediaErrorMessage(err) }
+      }
+
+      if (!result?.success) {
+        sourcePreparation.failed += 1
+        console.warn(`[Export] Could not prepare ${candidate.sourceName}; standard decoder remains available: ${result?.error || 'unknown error'}`)
+        continue
+      }
+
+      if (result.prepared) {
+        const preparedUrl = await window.electronAPI.getFileUrlDirect(result.outputPath || preparedPath)
+        preparedFrameSourceUrls.set(candidate.sourceUrl, preparedUrl)
+        if (candidate.mode === 'transcode') {
+          // The original stays undecodable for the element path, so point
+          // every downstream consumer (element fallback, duration reads) at
+          // the intermediate as well; only then clear the failure record.
+          try {
+            const video = await loadVideo(preparedUrl)
+            if (!video.videoWidth || !video.videoHeight) {
+              throw new Error('Prepared intermediate has no decodable video stream')
+            }
+            videoElements.set(candidate.sourceUrl, video)
+            failedVideoSources.delete(candidate.sourceUrl)
+            failedVideoSourceNames.delete(candidate.sourceUrl)
+            sourcePreparation.transcoded += 1
+            console.log(`[Export] Prepared ${candidate.sourceName} as an H.264 intermediate (source codec is not decodable in the renderer)`)
+          } catch (err) {
+            sourcePreparation.failed += 1
+            console.warn(`[Export] Prepared intermediate for ${candidate.sourceName} did not load: ${getMediaErrorMessage(err)}`)
+          }
+          continue
+        }
+        sourcePreparation.remuxed += 1
+        console.log(`[Export] Prepared ${candidate.sourceName} for fast sequential decoding with a lossless stream copy`)
+      } else {
+        preparedFrameSourceUrls.set(candidate.sourceUrl, candidate.sourceUrl)
+        sourcePreparation.reused += 1
+        console.log(`[Export] ${candidate.sourceName} is already optimized for fast sequential decoding`)
+      }
+    }
+  }
+
+  // Fail loudly on any source still undecodable after preparation (or when
+  // preparation is unavailable: web build, WebCodecs kill switch, missing
+  // local path, failed transcode) — its clips would silently render black
+  // through the whole export while the audio mix still works.
+  if (failedVideoSourceNames.size > 0) {
+    const affected = []
+    for (const clip of videoClips) {
+      if (clip.type !== 'video') continue
+      const clipUrl = cachedVideoSources.get(clip.id) || resolvedAssetUrls.get(clip.assetId)
+      const failure = clipUrl ? failedVideoSourceNames.get(clipUrl) : null
+      if (failure && !affected.some((entry) => entry.name === failure.name)) {
+        affected.push(failure)
+      }
+    }
+    if (affected.length > 0) {
+      throw new Error(
+        `Cannot export — ${affected.length === 1 ? 'a source' : `${affected.length} sources`} on the timeline cannot be decoded and would render black: `
+        + affected.map((entry) => `${entry.name} (${entry.reason})`).join('; ')
+        + '. Convert to H.264, or remove/disable the affected clips.'
+      )
+    }
+  }
   
   // WebCodecs sequential decode (see exportFrameSource.js). Random-access
   // <video> seeks dominate export time; qualifying clips route through a
   // per-clip sequential decoder instead, falling back to the element path
   // per clip on any doubt. Kill switch: localStorage
   // 'vidwright-export-webcodecs' = '0'.
-  const webCodecsEnabled = isWebCodecsExportEnabled()
   const FRAME_CURSOR_PREFETCH_SEC = 3
   // Per-phase wall-clock accumulators, surfaced in the completion payload so
   // a single export run shows where render time actually goes.
   const exportPerf = { yieldMs: 0, layersMs: 0, sampleMs: 0, readbackMs: 0, pipeMs: 0, preSeekBatches: 0, preSeekClips: 0 }
   resetFrameSourceStats()
-  // At most ONE frame write is in flight at a time (order into FFmpeg's
-  // stdin must be preserved); it overlaps with the next frame's render.
-  let pendingFrameWrite = null
+  // Pipe writes stack up to a small in-flight depth so the renderer's
+  // structured-clone serialize, the main process's handling, and FFmpeg's
+  // stdin write overlap across frames instead of running as one serial
+  // round trip per frame. Order into FFmpeg's stdin is preserved: writes
+  // fire and settle strictly FIFO, and Electron delivers same-channel
+  // messages in send order. invoke() serializes its arguments
+  // synchronously, so a queued frame's buffer may be reused as soon as the
+  // call returns.
+  const exportPipelineEnabled = isExportPipelineEnabled()
+  const maxInFlightPipeWrites = exportPipelineEnabled ? 3 : 1
+  const inFlightPipeWrites = []
+  const pendingGpuReadbacks = []
+  const settleOldestPipeWrite = async () => {
+    const result = await inFlightPipeWrites.shift()
+    if (!result?.success) {
+      throw new Error(result?.error || 'Failed to write frame to FFmpeg pipe.')
+    }
+  }
+  const sendFrameToPipe = async (frameBuffer) => {
+    const pipeWriteStart = performance.now()
+    while (inFlightPipeWrites.length >= maxInFlightPipeWrites) {
+      await settleOldestPipeWrite()
+    }
+    inFlightPipeWrites.push(window.electronAPI.writeFrameToPipe(framePipeSessionId, frameBuffer))
+    exportPerf.pipeMs += performance.now() - pipeWriteStart
+  }
+  // GPU frames are collected one frame late (fence + PBO in the compositor)
+  // so the loop never blocks on the GPU finishing the frame it just
+  // composited.
+  const sendOldestGpuReadback = async () => {
+    const readbackStart = performance.now()
+    const pixels = await gpu.resolveFrameReadback(pendingGpuReadbacks.shift())
+    exportPerf.readbackMs += performance.now() - readbackStart
+    await sendFrameToPipe(pixels.buffer)
+  }
   const clipFrameCursors = new Map() // clipId -> { promise, cursor, settled, clipEnd }
+  const standardDecoderClipIds = new Set()
+  const loggedStandardDecoderSources = new Set()
   let webCodecsClipCount = 0
   let elementPathClipCount = 0
   const countedClipPaths = new Set()
@@ -1216,14 +1698,33 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   }
 
   const getClipCursorEntry = (clip) => {
-    if (!webCodecsEnabled || clip.type !== 'video' || clip.reverse) return null
+    if (!webCodecsEnabled || clip.type !== 'video' || clip.reverse || standardDecoderClipIds.has(clip.id)) return null
     const existing = clipFrameCursors.get(clip.id)
     if (existing) return existing
     const cachedUrl = cachedVideoSources.get(clip.id)
     const sourceUrl = cachedUrl || resolvedAssetUrls.get(clip.assetId)
     if (!sourceUrl || failedVideoSources.has(sourceUrl)) return null
+    const preparedSourceUrl = preparedFrameSourceUrls.get(sourceUrl) || null
+    const sourcePrepared = preparedFrameSourceUrls.has(sourceUrl)
     const usingCached = !!cachedUrl
     const trimStart = usingCached ? 0 : (clip.trimStart || 0)
+    const cursorStartTime = Math.max(0, trimStart - 1.5)
+    const sourceVideo = videoElements.get(sourceUrl)
+    const fallbackReason = getWebCodecsExportFallbackReason({
+      sourceDuration: sourceVideo?.duration,
+      startTime: cursorStartTime,
+      sourcePrepared,
+    })
+    if (fallbackReason) {
+      standardDecoderClipIds.add(clip.id)
+      if (!loggedStandardDecoderSources.has(sourceUrl)) {
+        loggedStandardDecoderSources.add(sourceUrl)
+        const asset = assetsState.getAssetById(clip.assetId)
+        const sourceName = asset?.name || `clip ${clip.id}`
+        console.warn(`[Export] Using standard video decoder for ${sourceName}: ${fallbackReason}`)
+      }
+      return null
+    }
     const rawTrimEnd = clip.trimEnd ?? clip.sourceDuration
     const sourceEnd = usingCached
       ? (Number(clip.duration) || null)
@@ -1234,12 +1735,12 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       clipEnd: (Number(clip.startTime) || 0) + (Number(clip.duration) || 0),
     }
     entry.promise = createClipFrameCursor({
-      url: sourceUrl,
+      url: preparedSourceUrl || sourceUrl,
       // Transitions sample source handles beyond the trim window
       // (allowHandles), so decode from a bit before the in-point.
-      startTime: Math.max(0, trimStart - 1.5),
+      startTime: cursorStartTime,
       endTime: sourceEnd,
-      label: `clip ${clip.id}`,
+      label: `clip ${clip.id} (${assetsState.getAssetById(clip.assetId)?.name || 'unnamed source'})`,
     }).then((cursor) => {
       entry.cursor = cursor
       entry.settled = true
@@ -1311,6 +1812,19 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       framePipeSessionId = pipeStart.sessionId
       framePipeEncoderUsed = pipeStart.encoderUsed || null
       console.log(`Export frame pipe started with: ${framePipeEncoderUsed || 'unknown encoder'}`)
+      if (pipeStart.hardwareFallback) {
+        // The hardware encoder failed its runtime probe (missing from this
+        // ffmpeg build, or the driver refused it) — say so instead of
+        // silently exporting with software, and keep it for the result.
+        framePipeHardwareFallback = pipeStart.hardwareFallback
+        console.warn(`[Export] Hardware encoder unavailable (${framePipeHardwareFallback.requestedEncoder}): ${framePipeHardwareFallback.reason} — exporting with ${framePipeHardwareFallback.fallbackEncoder}.`)
+        onProgress({ status: `Hardware encoder unavailable — exporting with ${framePipeHardwareFallback.fallbackEncoder}`, progress: 4 })
+      }
+    } else if (pipeStart?.code === 'ffmpeg-missing' || pipeStart?.code === 'spawn-failed') {
+      // The PNG fallback needs the same FFmpeg binary for its encode step,
+      // so an unstartable FFmpeg would only fail again after rendering
+      // every frame.
+      throw new Error(pipeStart?.error || 'FFmpeg could not be started for export.')
     } else {
       console.warn('[Export] Fast FFmpeg pipe unavailable; falling back to PNG frame sequence:', pipeStart?.error)
       onProgress({ status: 'Fast pipe unavailable - using PNG frame sequence...', progress: 4 })
@@ -1375,7 +1889,7 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
 
     const matteClipTime = time - (matteClip.startTime || 0)
     const matteTransform = scaleTransformToExport(
-      applyEffectsToTransform(getAnimatedTransform(matteClip, matteClipTime) || matteClip.transform || {}, matteClip.effects, matteClipTime)
+      applyEffectsToTransform(getAnimatedTransform(matteClip, matteClipTime) || matteClip.transform || {}, getRenderEffects(matteClip), matteClipTime)
     )
     const matteOpacity = typeof matteTransform.opacity === 'number' ? matteTransform.opacity / 100 : 1
     if (matteOpacity <= 0.001) return matteCanvas
@@ -1570,17 +2084,21 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       if (clip.type === 'adjustment') {
         const clipTime = time - clip.startTime
         const adjustmentSettings = normalizeAdjustmentSettings(
-          getAnimatedAdjustmentSettings(clip, clipTime) || clip.adjustments || {}
+          getRenderAdjustments(clip, clipTime)
         )
         const baseClipTransform = getAnimatedTransform(clip, clipTime) || clip.transform || {}
         // Apply camera shake / transform-affecting effects to the adjustment
         // layer so shake propagates to every clip beneath.
-        const clipTransform = scaleTransformToExport(applyEffectsToTransform(baseClipTransform, clip.effects, clipTime))
+        const clipTransform = scaleTransformToExport(applyEffectsToTransform(baseClipTransform, getRenderEffects(clip), clipTime))
         const usesManagedPixelEffects = hasManagedPixelOrVignetteEffect(clip, clipTime)
         const adjustmentIsActive = hasAdjustmentEffect(adjustmentSettings)
+        // Transform-only adjustment layers must still composite (they draw
+        // the transformed stage copy back over the stage) — export parity
+        // with the preview renderer.
+        const transformIsActive = hasTransformingAdjustmentTransform(clipTransform)
 
         if (gpu) {
-          if (!adjustmentIsActive && !usesManagedPixelEffects) continue
+          if (!adjustmentIsActive && !usesManagedPixelEffects && !transformIsActive) continue
           const rect = getBaseDrawRect(width, height, width, height)
           const corners = getClipQuadCorners(rect, clipTransform, null)
           if (!corners) continue
@@ -1594,7 +2112,7 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
             colorSettings: adjustmentSettings,
             blurPx: adjustmentSettings.blur > 0 ? adjustmentSettings.blur : null,
             managedPasses: usesManagedPixelEffects
-              ? buildManagedEffectGpuPasses(clip.effects, clipTime, frameIndex, width, height)
+              ? buildManagedEffectGpuPasses(getRenderEffects(clip), clipTime, frameIndex, width, height)
               : null,
             opacity: baseOpacity,
             blendMode,
@@ -1602,8 +2120,8 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
           continue
         }
 
-        if (adjustmentCtx && (adjustmentIsActive || usesManagedPixelEffects)) {
-          const usesTonalAdjustments = hasTonalAdjustmentEffect(adjustmentSettings)
+        if (adjustmentCtx && (adjustmentIsActive || usesManagedPixelEffects || transformIsActive)) {
+          const usesTonalAdjustments = needsAdvancedColorPass(adjustmentSettings)
           let adjustmentOutputCanvas = null
 
           if (usesTonalAdjustments) {
@@ -1620,9 +2138,10 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
               adjustmentCtx.restore()
               adjustmentOutputCanvas = adjustmentCanvas
             }
-          } else if (usesManagedPixelEffects) {
-            // No color adjustment but there are managed effects to apply to
-            // the composited layers beneath this adjustment clip.
+          } else if (usesManagedPixelEffects || transformIsActive) {
+            // No color adjustment, but either managed effects apply to the
+            // stage snapshot, or a transform-only adjustment draws the plain
+            // snapshot back transformed.
             adjustmentCtx.clearRect(0, 0, width, height)
             adjustmentCtx.drawImage(canvas, 0, 0)
             adjustmentOutputCanvas = adjustmentCanvas
@@ -1699,16 +2218,16 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       const fullBakeUrl = cachedVideoSources.get(clip.id) || null
       const isFullBake = !!fullBakeUrl && clip.cacheKind === 'full'
       const resolveClipTransformAtTime = (sampleClipTime) => scaleTransformToExport(
-        applyEffectsToTransform(getAnimatedTransform(clip, sampleClipTime) || clip.transform || {}, clip.effects, sampleClipTime)
+        applyEffectsToTransform(getAnimatedTransform(clip, sampleClipTime) || clip.transform || {}, getRenderEffects(clip), sampleClipTime)
       )
       const liveClipTransform = resolveClipTransformAtTime(clipTime)
       const clipTransform = isFullBake
         ? { opacity: liveClipTransform.opacity, blendMode: liveClipTransform.blendMode }
         : liveClipTransform
       const clipAdjustmentSettings = normalizeAdjustmentSettings(
-        isFullBake ? {} : (getAnimatedAdjustmentSettings(clip, clipTime) || clip.adjustments || {})
+        isFullBake ? {} : getRenderAdjustments(clip, clipTime)
       )
-      const usesTonalAdjustments = hasTonalAdjustmentEffect(clipAdjustmentSettings)
+      const usesTonalAdjustments = needsAdvancedColorPass(clipAdjustmentSettings)
       const clipAdjustmentFilter = buildCssFilterFromAdjustments(clipAdjustmentSettings)
       const clipAdjustmentFilterValue = clipAdjustmentFilter !== 'none' ? clipAdjustmentFilter : null
       const usesManagedPixelEffects = !isFullBake && hasManagedPixelOrVignetteEffect(clip, clipTime)
@@ -1719,8 +2238,9 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
         ? [{ clipTime, weight: 1 }]
         : getMotionBlurSamples(clip, clipTime, fps, 'export')
       const hasMotionBlurSamples = motionBlurSamples.length > 1
-      if ((clip.type === 'text' || clip.type === 'shape') && !isFullBake) {
+      if ((clip.type === 'text' || clip.type === 'shape' || clip.type === 'captions') && !isFullBake) {
         const isShapeClip = clip.type === 'shape'
+        const isCaptionsClip = clip.type === 'captions'
         const baseOpacity = typeof clipTransform.opacity === 'number' ? clipTransform.opacity / 100 : 1
         const clipOpacity = (transitionStyle?.opacity ?? 1) * baseOpacity
         const blendMode = clipTransform.blendMode || 'normal'
@@ -1734,7 +2254,9 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
           return { shapeClip, rect }
         }
         const drawNativeClip = (targetCtx, rect, shapeClip, sampleClipTime) => {
-          if (isShapeClip) {
+          if (isCaptionsClip) {
+            drawLiveCaptionsFrame(targetCtx, rect.width, rect.height, clip.captions, sampleClipTime)
+          } else if (isShapeClip) {
             drawShape(targetCtx, { x: 0, y: 0, width: rect.width, height: rect.height }, shapeClip)
           } else {
             drawText(targetCtx, rect, clip, textStyleScale, sampleClipTime)
@@ -1908,7 +2430,17 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       const asset = assetsState.getAssetById(clip.assetId)
       const cachedSourceUrl = cachedVideoSources.get(clip.id)
       const usingCachedRender = !!cachedSourceUrl
-      const maskEffect = (!usingCachedRender && (clip.effects || []).find(effect => effect.type === 'mask' && effect.enabled))
+      // Parametric shape masks synthesize a mask effect with the feathered
+      // raster pre-baked (invert included), so the three mask bodies below
+      // run byte-identical logic for shapes and AI raster masks alike. The
+      // OPAQUE luminance encoding is the one every export path reads —
+      // coverage must live in RGB here, not alpha (see utils/shapeMask.js).
+      const maskBypassed = isClipBypassed(clip, 'mask')
+      const animatedShapeMask = (!usingCachedRender && !maskBypassed) ? getAnimatedShapeMask(clip, clipTime) : null
+      const shapeMaskCanvases = animatedShapeMask ? getShapeMaskCanvases(animatedShapeMask) : null
+      const maskEffect = shapeMaskCanvases
+        ? { type: 'mask', enabled: true, invertMask: false, shapeCanvas: shapeMaskCanvases.luma, shapeSignature: getShapeMaskSignature(animatedShapeMask) }
+        : (!usingCachedRender && !maskBypassed && (clip.effects || []).find(effect => effect.type === 'mask' && effect.enabled))
       
       let sourceWidth = width
       let sourceHeight = height
@@ -2111,10 +2643,10 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
 
         let advancedOutputCanvas = offCanvas
         if (maskEffect) {
-          const maskAsset = assetsState.getAssetById(maskEffect.maskAssetId)
-          const maskFrameUrl = getMaskFrameInfo(clip, maskAsset, time)
-          const maskImageMap = maskElements.get(maskAsset?.id)
-          const maskImage = maskImageMap?.get(maskFrameUrl)
+          const maskAsset = maskEffect.shapeCanvas ? null : assetsState.getAssetById(maskEffect.maskAssetId)
+          const maskFrameUrl = maskEffect.shapeCanvas ? null : getMaskFrameInfo(clip, maskAsset, time)
+          const maskImageMap = maskEffect.shapeCanvas ? null : maskElements.get(maskAsset?.id)
+          const maskImage = maskEffect.shapeCanvas || maskImageMap?.get(maskFrameUrl)
 
           if (maskImage) {
             maskCtx.clearRect(0, 0, width, height)
@@ -2257,10 +2789,10 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
         let gpuMaskHandled = false
         let gpuMaskSpec = null
         if (maskEffect) {
-          const maskAsset = assetsState.getAssetById(maskEffect.maskAssetId)
-          const maskFrameUrl = getMaskFrameInfo(clip, maskAsset, time)
-          const maskImageMap = maskElements.get(maskAsset?.id)
-          const maskImage = maskImageMap?.get(maskFrameUrl)
+          const maskAsset = maskEffect.shapeCanvas ? null : assetsState.getAssetById(maskEffect.maskAssetId)
+          const maskFrameUrl = maskEffect.shapeCanvas ? null : getMaskFrameInfo(clip, maskAsset, time)
+          const maskImageMap = maskEffect.shapeCanvas ? null : maskElements.get(maskAsset?.id)
+          const maskImage = maskEffect.shapeCanvas || maskImageMap?.get(maskFrameUrl)
           // Masks run natively unless the clip also has velocity blur —
           // the one combination still on the 2D path (their 2D ordering,
           // velocity after mask, differs from the native chain's).
@@ -2271,7 +2803,7 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
               gpuMaskSpec = {
                 source: maskImage,
                 sourceKey: `${clip.id}:mask`,
-                sourceVersion: maskFrameUrl,
+                sourceVersion: maskEffect.shapeSignature || maskFrameUrl,
                 corners: maskCorners,
                 invert: !!maskEffect.invertMask,
                 // The 2D mask path blurs media+mask at draw time inside the
@@ -2511,11 +3043,11 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
         continue
       }
       if (maskEffect) {
-        const maskAsset = assetsState.getAssetById(maskEffect.maskAssetId)
-        const maskFrameUrl = getMaskFrameInfo(clip, maskAsset, time)
-        const maskImageMap = maskElements.get(maskAsset?.id)
-        const maskImage = maskImageMap?.get(maskFrameUrl)
-        
+        const maskAsset = maskEffect.shapeCanvas ? null : assetsState.getAssetById(maskEffect.maskAssetId)
+        const maskFrameUrl = maskEffect.shapeCanvas ? null : getMaskFrameInfo(clip, maskAsset, time)
+        const maskImageMap = maskEffect.shapeCanvas ? null : maskElements.get(maskAsset?.id)
+        const maskImage = maskEffect.shapeCanvas || maskImageMap?.get(maskFrameUrl)
+
         if (maskImage) {
           let buffers = maskRenderBuffers.get(clip.id)
           if (!buffers) {
@@ -2598,30 +3130,28 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
     exportPerf.layersMs += performance.now() - layersStart
 
     if (framePipeSessionId) {
-      const readbackStart = performance.now()
-      let frameBuffer
-      if (gpu) {
-        frameBuffer = gpu.readFramePixels().buffer
-      } else {
-        const frameData = ctx.getImageData(0, 0, width, height)
-        const pixelData = frameData.data
-        frameBuffer = pixelData.byteOffset === 0 && pixelData.byteLength === pixelData.buffer.byteLength
-          ? pixelData.buffer
-          : pixelData.buffer.slice(pixelData.byteOffset, pixelData.byteOffset + pixelData.byteLength)
-      }
-      exportPerf.readbackMs += performance.now() - readbackStart
-      // Pipeline: the previous frame's write ran while this frame rendered.
-      // Settle it, then fire this frame's write without waiting on it.
-      const pipeWriteStart = performance.now()
-      if (pendingFrameWrite) {
-        const previousWrite = await pendingFrameWrite
-        if (!previousWrite?.success) {
-          pendingFrameWrite = null
-          throw new Error(previousWrite?.error || 'Failed to write frame to FFmpeg pipe.')
+      if (gpu && exportPipelineEnabled) {
+        const readbackStart = performance.now()
+        pendingGpuReadbacks.push(gpu.beginFrameReadback())
+        exportPerf.readbackMs += performance.now() - readbackStart
+        if (pendingGpuReadbacks.length > 1) {
+          await sendOldestGpuReadback()
         }
+      } else {
+        const readbackStart = performance.now()
+        let frameBuffer
+        if (gpu) {
+          frameBuffer = gpu.readFramePixels().buffer
+        } else {
+          const frameData = ctx.getImageData(0, 0, width, height)
+          const pixelData = frameData.data
+          frameBuffer = pixelData.byteOffset === 0 && pixelData.byteLength === pixelData.buffer.byteLength
+            ? pixelData.buffer
+            : pixelData.buffer.slice(pixelData.byteOffset, pixelData.byteOffset + pixelData.byteLength)
+        }
+        exportPerf.readbackMs += performance.now() - readbackStart
+        await sendFrameToPipe(frameBuffer)
       }
-      pendingFrameWrite = window.electronAPI.writeFrameToPipe(framePipeSessionId, frameBuffer)
-      exportPerf.pipeMs += performance.now() - pipeWriteStart
       // Real task-queue yield while the write is in flight: decoder output
       // callbacks are event-loop tasks, and this loop is otherwise mostly
       // synchronous — without yielding, decoded frames sit undelivered
@@ -2668,25 +3198,28 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       }
     }
   }
-  if (pendingFrameWrite) {
-    const finalWrite = await pendingFrameWrite
-    pendingFrameWrite = null
-    if (!finalWrite?.success) {
-      throw new Error(finalWrite?.error || 'Failed to write frame to FFmpeg pipe.')
-    }
+  while (pendingGpuReadbacks.length > 0) {
+    await sendOldestGpuReadback()
+  }
+  while (inFlightPipeWrites.length > 0) {
+    await settleOldestPipeWrite()
   }
   if (webCodecsEnabled) {
-    console.log(`[Export] Frame sources: ${webCodecsClipCount} clip(s) via WebCodecs, ${elementPathClipCount} via video element`)
+    console.log(
+      `[Export] Frame sources: ${webCodecsClipCount} clip(s) via WebCodecs, ${elementPathClipCount} via video element; `
+      + `source preparation ${sourcePreparation.remuxed} remuxed, ${sourcePreparation.transcoded} transcoded, ${sourcePreparation.reused} reused, ${sourcePreparation.failed} failed`
+    )
   }
   closeAllFrameCursors()
   gpu?.dispose()
   } catch (err) {
     closeAllFrameCursors()
     gpu?.dispose()
-    if (pendingFrameWrite) {
-      pendingFrameWrite.catch(() => {})
-      pendingFrameWrite = null
+    pendingGpuReadbacks.length = 0
+    for (const write of inFlightPipeWrites) {
+      Promise.resolve(write).catch(() => {})
     }
+    inFlightPipeWrites.length = 0
     if (framePipeSessionId) {
       try {
         await window.electronAPI.abortFramePipe(framePipeSessionId)
@@ -2738,29 +3271,25 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       const activeTrackIds = new Set(activeTracks.map(track => track.id))
       const eligibleAudioClips = audioClips.filter(clip => activeTrackIds.has(clip.trackId))
 
-      const serializeClipForMix = (clip) => ({
-        id: clip.id,
-        assetId: clip.assetId,
-        trackId: clip.trackId,
-        type: clip.type,
-        startTime: clip.startTime,
-        duration: clip.duration,
-        trimStart: clip.trimStart || 0,
-        sourceTimeScale: clip.sourceTimeScale,
-        timelineFps: clip.timelineFps,
-        sourceFps: clip.sourceFps,
-        speed: clip.speed,
-        reverse: clip.reverse,
-        gainDb: normalizeAudioClipGainDb(clip.gainDb),
-        fadeIn: clip.fadeIn ?? 0,
-        fadeOut: clip.fadeOut ?? 0,
-        url: clip.url || null,
-      })
-      const serializeAssetsForMix = () => assetsState.assets.map(asset => ({
-        id: asset.id,
-        type: asset.type,
-        path: asset.path || null,
-        url: asset.url || null,
+      // Shared module-level builders (see above exportTimeline) so the
+      // pre-render validation, the audio-only export, and this mix can
+      // never drift apart.
+      const serializeClipForMix = serializeAudioClipForMix
+      const serializeAssetsForMix = () => serializeAudioAssetsForMix(assetsState.assets)
+      const countExpectedMixClips = (clips) => countExpectedAudioMixClips(clips, rangeStart, rangeEnd)
+      console.log('[audio-mix] export payload', JSON.stringify({
+        rangeStart,
+        rangeEnd,
+        totalDuration,
+        activeTrackIds: activeTracks.map(track => track.id),
+        clips: eligibleAudioClips.map(clip => ({
+          id: clip.id,
+          trackId: clip.trackId,
+          startTime: clip.startTime,
+          duration: clip.duration,
+          trimStart: clip.trimStart || 0,
+          assetId: clip.assetId,
+        })),
       }))
 
       // Parses the RIFF/WAVE files our own FFmpeg stem mixes produce
@@ -2881,6 +3410,12 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
             if (!stemResult?.success) {
               throw new Error(stemResult?.error || `Stem mix failed for track ${track.id}`)
             }
+            const expectedStemClipCount = countExpectedMixClips(trackClips)
+            if (stemResult.clipCount !== expectedStemClipCount) {
+              throw new Error(
+                `Stem mix for ${track.name || track.id} included ${stemResult.clipCount || 0} of ${expectedStemClipCount} clips`
+              )
+            }
             stemPaths.push(stemPath)
             const readResult = await window.electronAPI.readFileAsBuffer(stemPath)
             if (!readResult?.success || !readResult.data) {
@@ -2914,6 +3449,12 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
             const decodeStart = Date.now()
             const stemBuffer = parseWavToAudioBuffer(arrayBuffer, offlineContext)
             console.log(`[mixerfx] parsed in ${Date.now() - decodeStart}ms: ${stemBuffer.duration.toFixed(2)}s ${stemBuffer.numberOfChannels}ch @ ${stemBuffer.sampleRate}Hz`)
+            const stemDurationTolerance = Math.max(2 / sampleRate, 0.002)
+            if (stemBuffer.duration + stemDurationTolerance < totalDuration) {
+              throw new Error(
+                `Stem for ${stem.track.name || stem.track.id} is incomplete (${stemBuffer.duration.toFixed(3)}s of ${totalDuration.toFixed(3)}s)`
+              )
+            }
             const source = offlineContext.createBufferSource()
             source.buffer = stemBuffer
             const trackChain = buildInsertChain(offlineContext, stem.track.inserts)
@@ -2961,9 +3502,12 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
       }
 
       // Preferred path: mix in main process with FFmpeg (avoids renderer OfflineAudioContext hangs).
+      let mainProcessMixAttempted = false
+      let mainProcessMixError = null
       if (!audioFilePath && window.electronAPI?.mixAudio && eligibleAudioClips.length > 0) {
         let ffmpegMixHeartbeat = null
         try {
+          mainProcessMixAttempted = true
           updateAudioStatus('Preparing FFmpeg audio mix…', 82)
           ffmpegMixHeartbeat = setInterval(() => {
             updateAudioStatus('Mixing audio…', 86)
@@ -2978,21 +3522,18 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
             masterVolume: masterAudioGain * 100,
             timeoutMs: AUDIO_MIX_TIMEOUT_MS,
             clips: eligibleAudioClips.map(serializeClipForMix),
-            tracks: timelineState.tracks
-              .filter(track => track.type === 'audio')
-              .map(track => ({
-                id: track.id,
-                type: track.type,
-                muted: !!track.muted,
-                visible: track.visible !== false,
-                channels: track.channels || 'stereo',
-                volume: track.volume ?? 100,
-                pan: track.pan ?? 0,
-              })),
+            tracks: serializeAudioTracksForMix(timelineState.tracks),
             assets: serializeAssetsForMix(),
           })
+          console.log('[audio-mix] FFmpeg result', JSON.stringify(mixResult))
           if (ffmpegMixHeartbeat) clearInterval(ffmpegMixHeartbeat)
           if (mixResult?.success) {
+            const expectedMixClipCount = countExpectedMixClips(eligibleAudioClips)
+            if (mixResult.clipCount !== expectedMixClipCount) {
+              throw new Error(
+                formatAudioMixDropError(mixResult.skipped, mixResult.clipCount || 0, expectedMixClipCount)
+              )
+            }
             audioFilePath = audioPath
             updateAudioStatus('Audio mix complete', 89)
           } else {
@@ -3000,13 +3541,21 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
           }
         } catch (err) {
           if (ffmpegMixHeartbeat) clearInterval(ffmpegMixHeartbeat)
-          console.warn('FFmpeg audio mix failed, falling back to WebAudio mix:', err)
+          console.warn('FFmpeg audio mix failed:', err)
+          mainProcessMixError = err
           audioFilePath = null
         }
       }
 
       // Fallback path for environments where FFmpeg mix IPC is unavailable.
       if (!audioFilePath) {
+        // Chromium's native decoder can crash the hidden export renderer on
+        // ordinary FLAC/WAV inputs (0xC0000005). When main-process FFmpeg was
+        // available but failed, surface that failure instead of entering the
+        // unsafe decoder fallback and taking the worker down.
+        if (mainProcessMixAttempted) {
+          throw new Error(mainProcessMixError?.message || 'Main-process audio mix failed.')
+        }
         const totalSamples = Math.ceil(totalDuration * sampleRate)
         const offlineContext = new OfflineAudioContext(channelCount, totalSamples, sampleRate)
         const decodedAudioCache = new Map()
@@ -3263,11 +3812,19 @@ export const exportTimeline = async (options = {}, onProgress = () => {}) => {
   return {
     outputPath,
     encoderUsed: encodeResult.encoderUsed || null,
+    // Set when a requested hardware encoder failed its runtime probe and the
+    // export fell back to software ({requestedEncoder, fallbackEncoder,
+    // reason}); surfaced in the worker-complete log and MCP export results.
+    hardwareFallback: framePipeHardwareFallback || encodeResult.hardwareFallback || null,
     // Surfaced in the main window's '[ExportPanel] Worker export complete'
     // log — the export runs in a hidden worker window whose own console
     // isn't visible in normal devtools captures.
     frameSources: webCodecsEnabled
-      ? { webcodecs: webCodecsClipCount, element: elementPathClipCount }
+      ? {
+        webcodecs: webCodecsClipCount,
+        element: elementPathClipCount,
+        sourcePreparation,
+      }
       : null,
     perf: {
       frames: totalFrames,

@@ -50,14 +50,21 @@ export default function ExportWorker() {
         }))
 
         console.log('[ExportWorker] Starting exportTimeline', { outputPath, width: options?.width, height: options?.height, fps: options?.fps })
+        const abortController = new AbortController()
+        window.electronAPI.onExportCancel?.(() => {
+          console.log('[ExportWorker] Cancel requested; aborting export')
+          abortController.abort()
+        })
         const result = await exportTimeline(
-          { ...options, outputPath },
+          { ...options, outputPath, signal: abortController.signal },
           (progress) => {
             if (progress?.progress % 20 < 5) console.log('[ExportWorker] Progress', progress?.progress, progress?.status)
             window.electronAPI.sendExportProgress?.(progress)
           }
         )
-        console.log('[ExportWorker] Export complete', result)
+        // Stringify: the worker's console reaches export-worker.log via the
+        // console-message event, which flattens objects to "[object Object]".
+        console.log('[ExportWorker] Export complete', JSON.stringify(result))
         window.electronAPI.sendExportComplete?.(result)
       } catch (err) {
         const errMsg = err && typeof err === 'object' && err instanceof Event

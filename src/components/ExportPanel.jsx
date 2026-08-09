@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, Plus, Trash2, Play, Settings, Film, Clock, RotateCcw } from 'lucide-react'
+import { Download, Plus, Trash2, Play, Settings, Film, Clock, RotateCcw, Square } from 'lucide-react'
 import useProjectStore, { RESOLUTION_PRESETS, FPS_PRESETS } from '../stores/projectStore'
 import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
 import exportTimeline from '../services/exporter'
 import buildFcpXml from '../services/fcpxmlExporter'
+import buildPremiereXml from '../services/premiereXmlExporter'
 import { mixTimelineAudioToWav } from '../services/timelineAudioMix'
 import { analyzeAudioBuffer } from '../services/audioAnalysis'
 
@@ -14,14 +15,37 @@ const EXPORT_FORMATS = [
   { id: 'mp4', label: 'MP4 (H.264/H.265)' },
   { id: 'webm', label: 'WebM (VP9)' },
   { id: 'prores', label: 'MOV (ProRes)' },
+  { id: 'audio', label: 'Audio Only (WAV/MP3/M4A)' },
   { id: 'gif', label: 'GIF (Preview - Soon)', disabled: true },
   { id: 'png-seq', label: 'PNG Sequence - Soon', disabled: true },
+]
+
+const XML_EXPORT_FORMATS = [
+  {
+    id: 'fcpxml',
+    label: 'Resolve / Final Cut (FCPXML)',
+    buttonLabel: 'Export FCPXML',
+    progressLabel: 'FCPXML',
+    extension: 'fcpxml',
+    dialogTitle: 'Export FCPXML',
+    filterName: 'Final Cut Pro XML',
+    tooltip: 'Export the current timeline as FCPXML for DaVinci Resolve or Final Cut Pro',
+  },
+  {
+    id: 'premiere',
+    label: 'Premiere Pro XML (Beta)',
+    buttonLabel: 'Export Premiere XML',
+    progressLabel: 'Premiere XML',
+    extension: 'xml',
+    dialogTitle: 'Export Premiere Pro XML',
+    filterName: 'Adobe Premiere Pro XML',
+    tooltip: 'Export the current timeline as Final Cut Pro 7 XMEML v5 for Adobe Premiere Pro',
+  },
 ]
 
 const RANGE_PRESETS = [
   { id: 'full', label: 'Full Timeline' },
   { id: 'inout', label: 'In/Out Range' },
-  { id: 'selection', label: 'Selection' },
 ]
 
 const VIDEO_CODECS = {
@@ -35,6 +59,9 @@ const VIDEO_CODECS = {
   prores: [
     { id: 'prores', label: 'ProRes' },
   ],
+  // Audio-only export renders no video; the empty list keeps the format
+  // switcher's codec reset from inventing one.
+  audio: [],
 }
 
 const AUDIO_CODECS = {
@@ -46,6 +73,11 @@ const AUDIO_CODECS = {
   ],
   prores: [
     { id: 'aac', label: 'AAC' },
+  ],
+  audio: [
+    { id: 'wav', label: 'WAV (lossless)' },
+    { id: 'mp3', label: 'MP3' },
+    { id: 'aac', label: 'M4A (AAC)' },
   ],
 }
 
@@ -268,6 +300,11 @@ function loadSavedExportSettings(storageKey, defaultSettings) {
       format: EXPORT_FORMATS.some((format) => format.id === saved.format && !format.disabled)
         ? saved.format
         : defaultSettings.format,
+      // Retired options (e.g. the old "selection" range) fall back to the
+      // default instead of leaving the dropdown on a value it no longer has.
+      range: RANGE_PRESETS.some((preset) => preset.id === saved.range)
+        ? saved.range
+        : defaultSettings.range,
       renderMode: 'single',
       useCachedRenders: false,
       fastSeek: false,
@@ -308,7 +345,16 @@ function ExportPanel() {
     currentTimelineId,
     getCurrentTimelineSettings,
   } = useProjectStore()
-  const { duration, inPoint, outPoint, getTimelineEndTime, selectedClipIds, clips, transitions, tracks } = useTimelineStore()
+  // Narrow selectors, not a bare useTimelineStore(): this panel stays mounted
+  // (lazily) once visited, and a bare subscription re-rendered it on every
+  // per-frame playhead write during playback.
+  const duration = useTimelineStore((s) => s.duration)
+  const inPoint = useTimelineStore((s) => s.inPoint)
+  const outPoint = useTimelineStore((s) => s.outPoint)
+  const getTimelineEndTime = useTimelineStore((s) => s.getTimelineEndTime)
+  const clips = useTimelineStore((s) => s.clips)
+  const transitions = useTimelineStore((s) => s.transitions)
+  const tracks = useTimelineStore((s) => s.tracks)
   const { assets } = useAssetsStore()
   
   const projectName = currentProject?.name || 'Untitled'
@@ -359,6 +405,9 @@ function ExportPanel() {
     }
   }
   const [isXmlExporting, setIsXmlExporting] = useState(false)
+  const [xmlExportFormat, setXmlExportFormat] = useState('fcpxml')
+  const xmlExportConfig = XML_EXPORT_FORMATS.find((format) => format.id === xmlExportFormat)
+    || XML_EXPORT_FORMATS[0]
   const exportStartRef = useRef(null)
   const renderStartRef = useRef(null)
   const [nvencStatus, setNvencStatus] = useState({
@@ -458,6 +507,13 @@ function ExportPanel() {
     }
     const onError = (err) => {
       const msg = typeof err === 'string' ? err : (err?.message ?? (err && typeof err === 'object' && err.constructor?.name === 'Event' ? `Export error (${err.type})` : String(err)))
+      if (/cancelled/i.test(String(msg))) {
+        console.log('[ExportPanel] Export stopped by user')
+        setExportError(null)
+        setExportStatus('Export stopped')
+        setIsExporting(false)
+        return
+      }
       console.error('[ExportPanel] Worker export error', err, '-> displayed:', msg)
       setExportError(msg || 'Export failed')
       setExportStatus('Export failed')
@@ -468,12 +524,20 @@ function ExportPanel() {
     window.electronAPI.onExportError(onError)
   }, [])
 
+  // Abort handle for exports running directly in this window (web build);
+  // worker exports are cancelled through the main process instead.
+  const exportAbortRef = useRef(null)
+  const handleStopExport = async () => {
+    setExportStatus('Stopping export...')
+    exportAbortRef.current?.abort()
+    try {
+      await window.electronAPI?.cancelExport?.()
+    } catch { /* worker already finished or gone */ }
+  }
+
   const timelineRangeLabel = useMemo(() => {
     if (settings.range === 'inout' && inPoint !== null && outPoint !== null) {
       return `${Math.max(0, inPoint).toFixed(2)}s → ${Math.max(inPoint, outPoint).toFixed(2)}s`
-    }
-    if (settings.range === 'selection') {
-      return 'Current selection'
     }
     return `0s → ${duration.toFixed(2)}s`
   }, [settings.range, inPoint, outPoint, duration])
@@ -490,8 +554,12 @@ function ExportPanel() {
         if (next.videoCodec && DEFAULT_CRF[next.videoCodec]) {
           next.crf = DEFAULT_CRF[next.videoCodec]
         }
-        if (value === 'webm' || value === 'prores') {
+        if (value === 'webm' || value === 'prores' || value === 'audio') {
           next.useHardwareEncoder = false
+        }
+        if (value === 'audio') {
+          // The whole export IS the audio — the include toggle is moot.
+          next.includeAudio = true
         }
       }
       
@@ -758,12 +826,6 @@ function ExportPanel() {
     if (settings.range === 'inout' && inPoint !== null && outPoint !== null) {
       return { start: Math.min(inPoint, outPoint), end: Math.max(inPoint, outPoint) }
     }
-    if (settings.range === 'selection' && selectedClipIds.length > 0) {
-      const selected = clips.filter(c => selectedClipIds.includes(c.id))
-      const start = Math.min(...selected.map(c => c.startTime))
-      const end = Math.max(...selected.map(c => c.startTime + c.duration))
-      return { start, end }
-    }
     return { start: 0, end: getTimelineEndTime() }
   }
 
@@ -891,7 +953,7 @@ function ExportPanel() {
       audioBitrateKbps: Number(jobSettings.audioBitrateKbps),
       audioSampleRate: Number(jobSettings.audioSampleRate),
       audioChannels: Number(jobSettings.audioChannels),
-      normalizeAudio: jobSettings.includeAudio && !!jobSettings.normalizeAudio,
+      normalizeAudio: (jobSettings.includeAudio || jobSettings.format === 'audio') && !!jobSettings.normalizeAudio,
       loudnessTarget: Number(jobSettings.loudnessTarget) || -14,
       useCachedRenders: false,
       useProxyMedia: jobSettings.useProxyMedia,
@@ -901,7 +963,9 @@ function ExportPanel() {
 
     if (window.electronAPI?.runExportInWorker && typeof currentProjectHandle === 'string') {
       try {
-        const outputExtension = jobSettings.format === 'webm' ? 'webm' : (jobSettings.format === 'prores' ? 'mov' : 'mp4')
+        const outputExtension = jobSettings.format === 'audio'
+          ? (jobSettings.audioCodec === 'mp3' ? 'mp3' : (jobSettings.audioCodec === 'wav' ? 'wav' : 'm4a'))
+          : (jobSettings.format === 'webm' ? 'webm' : (jobSettings.format === 'prores' ? 'mov' : 'mp4'))
         const outputFolder = await window.electronAPI.pathJoin(currentProjectHandle, 'renders')
         await window.electronAPI.createDirectory(outputFolder)
         const defaultPath = await window.electronAPI.pathJoin(outputFolder, `${options.filename}.${outputExtension}`)
@@ -944,7 +1008,22 @@ function ExportPanel() {
       }
     }
 
-    const result = await exportTimeline(options, (progress) => {
+    if (window.electronAPI) {
+      // The desktop build must never fall back to exporting inside the UI
+      // window: it bypasses the worker's crash reporting and memory
+      // headroom, and a renderer OOM there takes the whole app down.
+      setExportStatus('Export failed')
+      setIsExporting(false)
+      throw new Error(
+        window.electronAPI.runExportInWorker
+          ? 'Export worker unavailable: the project location is not a local folder path. Re-open the project from disk and try again.'
+          : 'Export worker unavailable. Restart Vidwright and try again.'
+      )
+    }
+
+    const directAbortController = new AbortController()
+    exportAbortRef.current = directAbortController
+    const result = await exportTimeline({ ...options, signal: directAbortController.signal }, (progress) => {
       setExportStatus(labelOverride ? `${labelOverride} • ${progress.status || ''}`.trim() : (progress.status || ''))
       if (typeof progress.progress === 'number') {
         setExportProgress(progress.progress)
@@ -989,14 +1068,14 @@ function ExportPanel() {
     }
   }
 
-  const handleExportFcpXml = async () => {
+  const handleExportXml = async () => {
     if (isExporting || queueRunning || isXmlExporting) return
     if (!window.electronAPI?.writeFile || !window.electronAPI?.saveFileDialog || !window.electronAPI?.pathJoin) {
-      setExportError('FCPXML export is only available in the desktop app.')
+      setExportError(`${xmlExportConfig.progressLabel} export is only available in the desktop app.`)
       return
     }
     if (typeof currentProjectHandle !== 'string') {
-      setExportError('Open a saved project before exporting FCPXML.')
+      setExportError(`Open a saved project before exporting ${xmlExportConfig.progressLabel}.`)
       return
     }
 
@@ -1006,7 +1085,7 @@ function ExportPanel() {
     setExportProgress(0)
     setEtaSeconds(null)
     setRenderFps(null)
-    setExportStatus('Preparing FCPXML...')
+    setExportStatus(`Preparing ${xmlExportConfig.progressLabel}...`)
 
     try {
       const projectPath = currentProjectHandle
@@ -1028,12 +1107,13 @@ function ExportPanel() {
         && exportableAssetIds.has(clip.assetId)
       )).length
       if (exportableClipCount === 0) {
-        throw new Error('No media clips with project file paths are available for FCPXML export.')
+        throw new Error(`No media clips with project file paths are available for ${xmlExportConfig.progressLabel} export.`)
       }
 
       const timelineSettings = getCurrentTimelineSettings() || { width: 1920, height: 1080, fps: 24 }
       const timelineName = currentTimeline?.name || 'Timeline'
-      const xml = buildFcpXml({
+      const buildXml = xmlExportConfig.id === 'premiere' ? buildPremiereXml : buildFcpXml
+      const xml = buildXml({
         projectName,
         timelineName,
         timelineSettings,
@@ -1051,28 +1131,32 @@ function ExportPanel() {
       await window.electronAPI.createDirectory(outputFolder)
       const defaultPath = await window.electronAPI.pathJoin(
         outputFolder,
-        `${sanitizeExportBaseName(`${projectName}_${timelineName}`)}.fcpxml`
+        `${sanitizeExportBaseName(`${projectName}_${timelineName}`)}.${xmlExportConfig.extension}`
       )
       const outputPath = await window.electronAPI.saveFileDialog({
-        title: 'Export FCPXML',
+        title: xmlExportConfig.dialogTitle,
         defaultPath,
-        filters: [{ name: 'Final Cut Pro XML', extensions: ['fcpxml'] }],
+        filters: [{ name: xmlExportConfig.filterName, extensions: [xmlExportConfig.extension] }],
       })
       if (!outputPath) {
-        setExportStatus('FCPXML export cancelled')
+        setExportStatus(`${xmlExportConfig.progressLabel} export cancelled`)
         return
       }
 
       const writeResult = await window.electronAPI.writeFile(outputPath, xml, { encoding: 'utf8' })
       if (!writeResult?.success) {
-        throw new Error(writeResult?.error || 'Failed to write FCPXML file.')
+        throw new Error(writeResult?.error || `Failed to write ${xmlExportConfig.progressLabel} file.`)
       }
 
-      setExportResult({ outputPath, encoderUsed: 'FCPXML', clipCount: exportableClipCount })
-      setExportStatus(`FCPXML export complete (${exportableClipCount} clips)`)
+      setExportResult({
+        outputPath,
+        encoderUsed: xmlExportConfig.progressLabel,
+        clipCount: exportableClipCount,
+      })
+      setExportStatus(`${xmlExportConfig.progressLabel} export complete (${exportableClipCount} clips)`)
     } catch (err) {
-      setExportError(err?.message || 'FCPXML export failed')
-      setExportStatus('FCPXML export failed')
+      setExportError(err?.message || `${xmlExportConfig.progressLabel} export failed`)
+      setExportStatus(`${xmlExportConfig.progressLabel} export failed`)
     } finally {
       setIsXmlExporting(false)
     }
@@ -1212,7 +1296,8 @@ function ExportPanel() {
           </div>
           
           <div className="mt-3 border-t border-sf-dark-700 pt-2 flex-1 min-h-0 overflow-y-auto pr-1 space-y-4">
-            {/* Video */}
+            {/* Video — the whole section is moot for an audio-only export */}
+            {settings.format !== 'audio' && (
             <div>
               <div className="text-[10px] text-sf-text-muted uppercase tracking-wider mb-2">Video</div>
               <div className="grid grid-cols-2 gap-3">
@@ -1496,12 +1581,18 @@ function ExportPanel() {
                 </div>
               </div>
             </div>
-            
+            )}
+
             {/* Audio */}
             <div>
               <div className="text-[10px] text-sf-text-muted uppercase tracking-wider mb-2">Audio</div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="col-span-2">
+                  {settings.format === 'audio' ? (
+                    <div className="text-xs text-sf-text-muted">
+                      Exports the program mix on its own — every track volume, pan, fade, and solo included. No video is rendered.
+                    </div>
+                  ) : (
                   <button
                     onClick={() => handleSettingChange('includeAudio', !settings.includeAudio)}
                     className={`px-2 py-1 text-xs rounded border transition-colors ${
@@ -1512,9 +1603,10 @@ function ExportPanel() {
                   >
                     Include Audio
                   </button>
+                  )}
                 </div>
-                
-                {settings.includeAudio ? (
+
+                {(settings.includeAudio || settings.format === 'audio') ? (
                   <>
                     <div>
                       <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Audio Codec</label>
@@ -1529,6 +1621,7 @@ function ExportPanel() {
                       </select>
                     </div>
                     
+                    {!(settings.format === 'audio' && settings.audioCodec === 'wav') && (
                     <div>
                       <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Audio Bitrate (kbps)</label>
                       <input
@@ -1540,6 +1633,7 @@ function ExportPanel() {
                         className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
                       />
                     </div>
+                    )}
                     
                     <div>
                       <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Sample Rate</label>
@@ -1635,7 +1729,7 @@ function ExportPanel() {
             
           </div>
           
-          <div className="mt-3 flex items-center justify-end gap-2 shrink-0">
+          <div className="mt-3 flex flex-wrap items-center justify-end gap-2 shrink-0">
             <button
               onClick={handleAddToQueue}
               className="px-3 py-1.5 text-xs rounded bg-sf-dark-700 text-sf-text-primary hover:bg-sf-dark-600 transition-colors flex items-center gap-1.5"
@@ -1655,19 +1749,41 @@ function ExportPanel() {
               <Play className="w-3 h-3" />
               {isExporting ? 'Exporting...' : (queueRunning ? 'Queue Running' : 'Start Export')}
             </button>
-            <button
-              onClick={handleExportFcpXml}
-              disabled={isExporting || queueRunning || isXmlExporting}
-              className={`px-3 py-1.5 text-xs rounded border flex items-center gap-1.5 transition-colors ${
-                isExporting || queueRunning || isXmlExporting
-                  ? 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
-                  : 'bg-sf-dark-800 text-sf-text-primary border-sf-dark-600 hover:border-sf-accent hover:text-white'
-              }`}
-              title="Export the current timeline as FCPXML for Resolve, Final Cut, or Premiere interchange"
-            >
-              <Download className="w-3 h-3" />
-              {isXmlExporting ? 'Exporting XML...' : 'Export FCPXML'}
-            </button>
+            {isExporting && (
+              <button
+                onClick={handleStopExport}
+                className="px-3 py-1.5 text-xs rounded border border-red-500/60 text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-1.5"
+              >
+                <Square className="w-3 h-3" />
+                Stop
+              </button>
+            )}
+            <div className="flex items-center">
+              <select
+                value={xmlExportFormat}
+                onChange={(event) => setXmlExportFormat(event.target.value)}
+                disabled={isExporting || queueRunning || isXmlExporting}
+                aria-label="XML export format"
+                className="h-[30px] max-w-52 px-2 text-xs rounded-l border border-r-0 bg-sf-dark-800 text-sf-text-primary border-sf-dark-600 focus:outline-none focus:border-sf-accent disabled:text-sf-text-muted disabled:cursor-not-allowed"
+              >
+                {XML_EXPORT_FORMATS.map((format) => (
+                  <option key={format.id} value={format.id}>{format.label}</option>
+                ))}
+              </select>
+              <button
+                onClick={handleExportXml}
+                disabled={isExporting || queueRunning || isXmlExporting}
+                className={`h-[30px] px-3 text-xs rounded-r border flex items-center gap-1.5 transition-colors ${
+                  isExporting || queueRunning || isXmlExporting
+                    ? 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
+                    : 'bg-sf-dark-800 text-sf-text-primary border-sf-dark-600 hover:border-sf-accent hover:text-white'
+                }`}
+                title={xmlExportConfig.tooltip}
+              >
+                <Download className="w-3 h-3" />
+                {isXmlExporting ? `Exporting ${xmlExportConfig.progressLabel}...` : xmlExportConfig.buttonLabel}
+              </button>
+            </div>
           </div>
 
           {(isExporting || exportProgress > 0) && (

@@ -10,6 +10,8 @@ export const EDITOR_HOTKEY_IDS = {
   NEXT_CLIP_BOUNDARY: 'timeline.nextClipBoundary',
   PREVIOUS_MARKER: 'timeline.previousMarker',
   NEXT_MARKER: 'timeline.nextMarker',
+  MATCH_FRAME: 'timeline.matchFrame',
+  REVEAL_IN_ASSETS: 'timeline.revealInAssets',
   SELECT_TO_END: 'timeline.selectToEnd',
   SELECT_FROM_START: 'timeline.selectFromStart',
   SPLIT_ACTIVE: 'timeline.splitActive',
@@ -82,6 +84,18 @@ export const EDITOR_HOTKEY_DEFINITIONS = [
     label: 'Jump to next visible clip boundary',
     description: 'Timeline navigation',
     defaultBinding: 'ArrowDown',
+  },
+  {
+    id: EDITOR_HOTKEY_IDS.MATCH_FRAME,
+    label: 'Match frame (open clip source at the playhead frame)',
+    description: 'Timeline navigation',
+    defaultBinding: 'F',
+  },
+  {
+    id: EDITOR_HOTKEY_IDS.REVEAL_IN_ASSETS,
+    label: 'Reveal clip asset in the Assets panel',
+    description: 'Timeline navigation',
+    defaultBinding: 'Shift+F',
   },
   {
     id: EDITOR_HOTKEY_IDS.PREVIOUS_MARKER,

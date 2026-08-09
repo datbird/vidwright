@@ -12,6 +12,8 @@ const yaml = require('js-yaml')
 const ffmpegStaticPath = require('ffmpeg-static')
 const ffprobeStatic = require('ffprobe-static')
 const ffprobeStaticPath = ffprobeStatic?.path || ffprobeStatic
+const { inspectIsoBmffLayout } = require('./exportSourcePreparation')
+const { registerCaptionWhisperHandlers } = require('./captionWhisper')
 const {
   ComfyLauncher,
   detectLaunchersForComfyRoot,
@@ -121,6 +123,42 @@ function resolvePackagedBinaryPath(binaryPath) {
 const ffmpegPath = resolvePackagedBinaryPath(ffmpegStaticPath)
 const ffprobePath = resolvePackagedBinaryPath(ffprobeStaticPath)
 
+// ffmpeg-static resolves a path whether or not its install script actually
+// downloaded the binary (skipped postinstalls, antivirus quarantine), and
+// spawning a dangling path dies with a bare ENOENT (-4058 on Windows). Export
+// entry points check existence up front so the failure names the path.
+function getFfmpegUnavailableError() {
+  if (!ffmpegPath) return 'FFmpeg binary not available.'
+  if (!fsSync.existsSync(ffmpegPath)) {
+    return `FFmpeg binary is missing at ${ffmpegPath}. Reinstall Vidwright (or run npm install in a dev checkout) to restore it.`
+  }
+  return null
+}
+
+// Session-log helper shared by the export-worker and main-window mirrors:
+// runs append across sessions, the file is trimmed to a cap on session
+// start, and the trim stays aligned to a session header so the file always
+// begins at a run boundary. Returns false when the header cannot be
+// written so callers can fall back or warn.
+const CAPPED_LOG_MAX_BYTES = 2 * 1024 * 1024
+function beginCappedLogSession(logPath, marker) {
+  try {
+    try {
+      const stat = fsSync.statSync(logPath)
+      if (stat.size > CAPPED_LOG_MAX_BYTES) {
+        const existing = fsSync.readFileSync(logPath, 'utf8')
+        const keepBytes = Math.floor(CAPPED_LOG_MAX_BYTES / 2)
+        const keepFrom = existing.indexOf(marker, existing.length - keepBytes)
+        fsSync.writeFileSync(logPath, keepFrom > 0 ? existing.slice(keepFrom) : existing.slice(-keepBytes))
+      }
+    } catch { /* first run or unreadable log — the append below creates it */ }
+    fsSync.appendFileSync(logPath, `${marker} ${new Date().toISOString()}\n`)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function parseFpsRatio(value) {
   if (!value || value === '0/0') return null
   const [num, den] = String(value).split('/').map(Number)
@@ -184,6 +222,35 @@ async function probeVideoInfo(filePath) {
         })
       } catch (err) {
         resolve({ success: false, error: err.message })
+      }
+    })
+  })
+}
+
+async function probeAudioDurationSeconds(filePath) {
+  if (!ffprobePath || !filePath) return null
+  return await new Promise((resolve) => {
+    const proc = spawn(ffprobePath, [
+      '-v', 'error',
+      '-select_streams', 'a:0',
+      '-show_entries', 'stream=duration:format=duration',
+      '-of', 'json',
+      filePath,
+    ], { windowsHide: true })
+    let stdout = ''
+    proc.stdout.on('data', (data) => { stdout += data.toString() })
+    proc.on('error', () => resolve(null))
+    proc.on('close', (code) => {
+      if (code !== 0) return resolve(null)
+      try {
+        const parsed = JSON.parse(stdout)
+        const streamDuration = Number(parsed?.streams?.[0]?.duration)
+        const formatDuration = Number(parsed?.format?.duration)
+        resolve(Number.isFinite(streamDuration)
+          ? streamDuration
+          : (Number.isFinite(formatDuration) ? formatDuration : null))
+      } catch {
+        resolve(null)
       }
     })
   })
@@ -2424,6 +2491,7 @@ function deriveWorkflowIdFromFile(filename = '') {
     api_openai_gpt_image_2_t2i: 'gpt-image-2-t2i',
     api_openai_gpt_image_2_ugc_keyframe: 'gpt-image-2-ugc-keyframe',
     api_seedance2_0_flf2v: 'seedance2-flf2v',
+    api_seedance2_0_mini_r2v: 'seedance2-mini-r2v',
     api_seedance2_0_r2v: 'seedance2-r2v',
     api_seedance2_0_t2v: 'seedance2-t2v',
     api_sonilo_v2m: 'sonilo-v2m',
@@ -3324,6 +3392,28 @@ async function createWindow(restoredWindowState = null) {
     }
   })
 
+  // Mirror the main window's console and crash events to userData/app.log
+  // (same append+cap pattern as export-worker.log). Failures before the
+  // export worker spawns — project open, export click, job assembly — are
+  // otherwise invisible in support logs.
+  const appLogPath = path.join(app.getPath('userData'), 'app.log')
+  if (beginCappedLogSession(appLogPath, '--- app session started')) {
+    const appLog = (line) => {
+      try { fsSync.appendFileSync(appLogPath, `${line}\n`) } catch { /* ignore */ }
+    }
+    mainWindow.webContents.on('console-message', (_event, level, message, lineNo, sourceId) => {
+      appLog(`[${new Date().toISOString().slice(11, 19)}] [${level}] ${message} (${String(sourceId).split('/').pop()}:${lineNo})`)
+    })
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      appLog(`!!! MAIN WINDOW RENDER PROCESS GONE: ${JSON.stringify(details)}`)
+    })
+    mainWindow.on('unresponsive', () => {
+      appLog('!!! MAIN WINDOW UNRESPONSIVE')
+    })
+  } else {
+    console.error(`[Vidwright] Could not write ${appLogPath}; main-window console mirroring disabled for this session.`)
+  }
+
   // Start maximized rather than true fullscreen. Maximized uses the full
   // work area (entire screen minus the OS taskbar/dock) so the user still
   // has access to their taskbar, tray, notifications, and Alt-Tab without
@@ -3525,7 +3615,22 @@ async function createWindow(restoredWindowState = null) {
       }
     })
 
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    mainWindow.webContents.setWindowOpenHandler(({ url, frameName }) => {
+      // Detached preview ("clean feed") window — an about:blank child the
+      // renderer scripts directly (see src/hooks/usePreviewPopout.js). No
+      // parent option: it must be free to sit on any display independently.
+      if (frameName === 'vidwright-preview-popout') {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            title: 'Vidwright Preview',
+            autoHideMenuBar: true,
+            backgroundColor: '#000000',
+            minWidth: 240,
+            minHeight: 240,
+          },
+        }
+      }
       if (isComfyAuthPopupUrl(url)) {
         return {
           action: 'allow',
@@ -4047,6 +4152,44 @@ function resolveMediaInputPath(mediaInput) {
   return mediaInput
 }
 
+// Bounded byte-range reads for the export frame source. The renderer's
+// file:// fetch ignores Range headers (Electron's asar-aware loader), so a
+// single fetch buffers a multi-GB source whole in the renderer regardless
+// of consumption pace. Length is capped server-side as defense in depth.
+ipcMain.handle('media:readFileRange', async (event, options = {}) => {
+  const filePath = typeof options.path === 'string' ? options.path : ''
+  const start = Number(options.start)
+  const length = Number(options.length)
+  const MAX_RANGE_READ_BYTES = 256 * 1024 * 1024
+  if (!filePath || !Number.isFinite(start) || start < 0 || !Number.isFinite(length) || length <= 0) {
+    return { success: false, error: 'Invalid range read request.' }
+  }
+  if (length > MAX_RANGE_READ_BYTES) {
+    return { success: false, error: 'Range read too large.' }
+  }
+  let handle = null
+  try {
+    handle = await fs.open(filePath, 'r')
+    const stat = await handle.stat()
+    if (start >= stat.size) {
+      return { success: true, bytes: new ArrayBuffer(0), fileSize: stat.size, eof: true }
+    }
+    const readLength = Math.min(length, stat.size - start)
+    const buffer = Buffer.allocUnsafe(readLength)
+    const { bytesRead } = await handle.read(buffer, 0, readLength, start)
+    return {
+      success: true,
+      bytes: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + bytesRead),
+      fileSize: stat.size,
+      eof: start + bytesRead >= stat.size,
+    }
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) }
+  } finally {
+    try { await handle?.close() } catch { /* ignore */ }
+  }
+})
+
 ipcMain.handle('media:getAudioWaveform', async (event, mediaInput, options = {}) => {
   if (!ffmpegPath) {
     return { success: false, error: 'FFmpeg binary not available.' }
@@ -4309,6 +4452,14 @@ ipcMain.handle('media:extractVideoPoster', async (event, inputPath, outputPath, 
 //   2. Doing the mix in the renderer via decodeAudioData() on multi-hundred-MB
 //      mp4 files reliably OOMs Chromium (renderer goes black). FFmpeg demuxes
 //      the audio stream without decoding video, so memory stays flat.
+// Local caption engine (whisper.cpp): status / install / transcribe handlers.
+registerCaptionWhisperHandlers({
+  app,
+  ipcMain,
+  ffmpegPath,
+  getMainWindow: () => mainWindow,
+})
+
 ipcMain.handle('captions:mixTimelineAudio', async (event, options = {}) => {
   if (!ffmpegPath) {
     return { success: false, error: 'FFmpeg binary not available.' }
@@ -4349,24 +4500,34 @@ ipcMain.handle('captions:mixTimelineAudio', async (event, options = {}) => {
 
   for (const clip of clips || []) {
     if (!clip) continue
-    if (clip.type !== 'video' && clip.type !== 'audio') { skip(clip, `type=${clip.type}`); continue }
+    // Audio-track clips only — the same audibility model as playback
+    // (AudioLayerRenderer) and export (export:mixAudio). Video clips are
+    // picture-only everywhere else in the app; captions must hear exactly
+    // the mix the user hears.
+    if (clip.type !== 'audio') { skip(clip, `type=${clip.type}`); continue }
     if (clip.enabled === false) { skip(clip, 'clip.enabled=false'); continue }
 
     const track = trackMap.get(clip.trackId)
     if (!track) { skip(clip, 'no-matching-track'); continue }
+    if (track.type !== 'audio') { skip(clip, `track.type=${track.type}`); continue }
     if (track.muted) { skip(clip, 'track.muted=true'); continue }
     if (track.visible === false) { skip(clip, 'track.visible=false'); continue }
 
     const asset = assetMap.get(clip.assetId)
     if (!asset) { skip(clip, 'no-matching-asset'); continue }
     if (asset.hasAudio === false) { skip(clip, 'asset.hasAudio=false'); continue }
-    if (asset.audioEnabled === false) { skip(clip, 'asset.audioEnabled=false'); continue }
+    // asset.audioEnabled is deliberately NOT checked: it is the video-clip
+    // embedded-audio toggle, and playback ignores it for audio-track clips —
+    // dropping a file onto an audio track is an explicit request to hear it.
     if (clip.audioEnabled === false) { skip(clip, 'clip.audioEnabled=false'); continue }
     if (clip.reverse) { skip(clip, 'clip.reverse=true'); continue }
 
     let inputPath = null
     if (asset.path && projectPath) {
-      inputPath = path.join(projectPath, asset.path)
+      // Relinked assets (manual or auto-relink) store an ABSOLUTE path;
+      // joining it onto the project folder makes garbage and the clip gets
+      // silently dropped from the mix. Only project-relative paths join.
+      inputPath = path.isAbsolute(asset.path) ? asset.path : path.join(projectPath, asset.path)
     }
     if (!inputPath && asset.absolutePath) {
       inputPath = asset.absolutePath
@@ -4428,7 +4589,7 @@ ipcMain.handle('captions:mixTimelineAudio', async (event, options = {}) => {
   }))
 
   if (preparedInputs.length === 0) {
-    return { success: false, error: 'No audible clips on the timeline — unmute a track or enable a clip\'s audio.' }
+    return { success: false, error: 'No audible clips on audio tracks — captions transcribe the same mix you hear. Unmute or solo an audio track, or add the audio to an audio track first.' }
   }
 
   const tempDir = path.join(app.getPath('temp'), 'vidwright-caption-audio')
@@ -4452,10 +4613,13 @@ ipcMain.handle('captions:mixTimelineAudio', async (event, options = {}) => {
   const inputFilters = []
   const mixLabels = []
   preparedInputs.forEach((entry, index) => {
+    // No atempo at unity rate: ffmpeg 6.1.1 amix silently truncates the whole
+    // mix at input 0's delay when that input's chain has atempo before adelay
+    // (same defect the export mixer works around — keep the graphs in parity).
     const filters = [
       `atrim=start=${formatFilterNumber(entry.sourceOffsetSec)}:duration=${formatFilterNumber(entry.sourceDurationSec)}`,
       'asetpts=PTS-STARTPTS',
-      ...buildAtempoFilterChain(entry.timeScale),
+      ...(Math.abs(entry.timeScale - 1) > 0.000001 ? buildAtempoFilterChain(entry.timeScale) : []),
       // Force each input to mono before mixing so inputs with different channel
       // layouts combine cleanly.
       'aformat=channel_layouts=mono',
@@ -4468,10 +4632,18 @@ ipcMain.handle('captions:mixTimelineAudio', async (event, options = {}) => {
     mixLabels.push(`[${label}]`)
   })
 
-  const durationClip = `atrim=duration=${formatFilterNumber(programDuration)},asetpts=PTS-STARTPTS`
-  const finalFilter = mixLabels.length === 1
-    ? `${mixLabels[0]}${durationClip}[outa]`
-    : `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:dropout_transition=0:normalize=0,${durationClip}[outa]`
+  // Silence bed as amix input 0 (parity with the export mixer): it never
+  // carries atempo or adelay, so the truncation bug cannot key off the first
+  // input — this also shields speed-ramped clips, which legitimately keep
+  // atempo — and apad makes the output span the full program even when every
+  // real input ends early or starts late.
+  const padAndTrim = `apad=whole_dur=${formatFilterNumber(programDuration)},atrim=duration=${formatFilterNumber(programDuration)},asetpts=PTS-STARTPTS`
+  const silenceLabel = 'mixsilence'
+  inputFilters.push(
+    `anullsrc=r=${normalizedSampleRate}:cl=mono:d=${formatFilterNumber(programDuration)}[${silenceLabel}]`
+  )
+  const allMixLabels = [`[${silenceLabel}]`, ...mixLabels]
+  const finalFilter = `${allMixLabels.join('')}amix=inputs=${allMixLabels.length}:duration=longest:dropout_transition=0:normalize=0,${padAndTrim}[outa]`
 
   args.push(
     '-filter_complex', `${inputFilters.join(';')};${finalFilter}`,
@@ -4717,6 +4889,29 @@ ipcMain.handle('shell:openExternal', async (_event, url) => {
     return { success: true }
   } catch (error) {
     return { success: false, error: error?.message || 'Failed to open URL.' }
+  }
+})
+
+ipcMain.handle('shell:showItemInFolder', async (_event, targetPath) => {
+  const raw = String(targetPath || '').trim()
+  if (!raw) {
+    return { success: false, error: 'No path provided.' }
+  }
+  try {
+    const path = require('path')
+    const fs = require('fs')
+    if (!path.isAbsolute(raw)) {
+      return { success: false, error: 'Path must be absolute.' }
+    }
+    const normalized = path.normalize(raw)
+    if (!fs.existsSync(normalized)) {
+      return { success: false, error: 'File not found on disk.' }
+    }
+    const { shell } = require('electron')
+    shell.showItemInFolder(normalized)
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error?.message || 'Failed to reveal the file.' }
   }
 })
 
@@ -4971,19 +5166,45 @@ ipcMain.handle('workflowSetup:checkFiles', async (_event, payload = {}) => {
     const extraModelPaths = await loadExtraModelPathConfigForComfyRoot(validation.normalizedPath)
 
     // Cache per-subdir directory listings so we can do case-insensitive matching
-    // on filesystems where casing differs from the declared filename.
+    // on filesystems where casing differs from the declared filename. Users
+    // often organize model folders into subfolders (models/diffusion_models/
+    // WAN/...), so each listing also walks two levels deep and maps the
+    // lowercased filename to its relative path (shallower entries win).
+    const MODEL_SCAN_MAX_DEPTH = 2
+    const MODEL_SCAN_MAX_ENTRIES = 5000
     const dirListingCache = new Map()
     const getDirListing = async (absoluteDir) => {
       if (dirListingCache.has(absoluteDir)) return dirListingCache.get(absoluteDir)
-      let entries = []
-      try {
-        entries = await fs.readdir(absoluteDir)
-      } catch {
-        entries = []
+      const relPathByLowerName = new Map()
+      const walk = async (dir, relPrefix, depth) => {
+        if (depth > MODEL_SCAN_MAX_DEPTH || relPathByLowerName.size >= MODEL_SCAN_MAX_ENTRIES) return
+        let entries = []
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+        const subdirNames = []
+        for (const entry of entries) {
+          if (relPathByLowerName.size >= MODEL_SCAN_MAX_ENTRIES) break
+          const name = String(entry?.name || '')
+          if (!name) continue
+          if (entry.isDirectory()) {
+            subdirNames.push(name)
+            continue
+          }
+          const lowerName = name.toLowerCase()
+          if (!relPathByLowerName.has(lowerName)) {
+            relPathByLowerName.set(lowerName, relPrefix ? path.join(relPrefix, name) : name)
+          }
+        }
+        for (const subdirName of subdirNames) {
+          await walk(path.join(dir, subdirName), relPrefix ? path.join(relPrefix, subdirName) : subdirName, depth + 1)
+        }
       }
-      const lowerSet = new Set(entries.map((name) => String(name || '').toLowerCase()))
-      dirListingCache.set(absoluteDir, lowerSet)
-      return lowerSet
+      await walk(absoluteDir, '', 0)
+      dirListingCache.set(absoluteDir, relPathByLowerName)
+      return relPathByLowerName
     }
 
     for (const file of files) {
@@ -5021,9 +5242,10 @@ ipcMain.handle('workflowSetup:checkFiles', async (_event, payload = {}) => {
 
       for (const absoluteDir of candidateDirs) {
         const listing = await getDirListing(absoluteDir)
-        if (listing.has(lowerTarget)) {
+        const matchedRelPath = listing.get(lowerTarget)
+        if (matchedRelPath) {
           exists = true
-          resolvedPath = path.join(absoluteDir, filename)
+          resolvedPath = path.join(absoluteDir, matchedRelPath)
           break
         }
       }
@@ -5227,15 +5449,36 @@ ipcMain.handle('export:runInWorker', async (event, payload) => {
   })
   const workerContents = exportWorkerWindow.webContents
   // The export worker is a hidden window, so its console is invisible in
-  // normal use. Mirror it to userData/export-worker.log (truncated per run)
-  // so export failures are diagnosable from disk — including renderer
-  // crashes, which otherwise present as a silently frozen progress line.
-  const workerLogPath = path.join(app.getPath('userData'), 'export-worker.log')
-  try {
-    fsSync.writeFileSync(workerLogPath, `--- export worker started ${new Date().toISOString()}\n`)
-  } catch { /* logging must never block exporting */ }
+  // normal use. Mirror it to userData/export-worker.log so export failures
+  // are diagnosable from disk — including renderer crashes, which otherwise
+  // present as a silently frozen progress line. If the primary log cannot
+  // be written (locked file, blocked folder), logging falls back to the
+  // temp directory and says so, instead of failing silently while crash
+  // messages point at a log that never updates.
+  const workerLogPrimaryPath = path.join(app.getPath('userData'), 'export-worker.log')
+  const workerLogFallbackPath = path.join(app.getPath('temp'), 'vidwright-export-worker.log')
+  let workerLogActivePath = workerLogPrimaryPath
+  let workerLogWarned = false
+  const noteWorkerLogFailure = (err) => {
+    if (workerLogWarned) return
+    workerLogWarned = true
+    console.error(`[Export] Could not write ${workerLogPrimaryPath} (${err?.message || err}); using ${workerLogFallbackPath} instead.`)
+  }
+  if (!beginCappedLogSession(workerLogActivePath, '--- export worker started')) {
+    noteWorkerLogFailure(new Error('session header write failed'))
+    workerLogActivePath = workerLogFallbackPath
+    beginCappedLogSession(workerLogActivePath, '--- export worker started')
+  }
   const workerLog = (line) => {
-    try { fsSync.appendFileSync(workerLogPath, `${line}\n`) } catch { /* ignore */ }
+    try {
+      fsSync.appendFileSync(workerLogActivePath, `${line}\n`)
+    } catch (err) {
+      if (workerLogActivePath === workerLogPrimaryPath) {
+        noteWorkerLogFailure(err)
+        workerLogActivePath = workerLogFallbackPath
+        try { fsSync.appendFileSync(workerLogActivePath, `${line}\n`) } catch { /* ignore */ }
+      }
+    }
   }
   workerContents.on('console-message', (_event, level, message, lineNo, sourceId) => {
     workerLog(`[${new Date().toISOString().slice(11, 19)}] [${level}] ${message} (${String(sourceId).split('/').pop()}:${lineNo})`)
@@ -5248,7 +5491,7 @@ ipcMain.handle('export:runInWorker', async (event, payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(
         'export:error',
-        `Export process crashed (${details?.reason || 'unknown'}, code ${details?.exitCode ?? '?'}). Details in export-worker.log.`
+        `Export process crashed (${details?.reason || 'unknown'}, code ${details?.exitCode ?? '?'}). Details in ${workerLogActivePath}.`
       )
     }
     if (exportWorkerWindow && !exportWorkerWindow.isDestroyed()) {
@@ -5393,9 +5636,25 @@ const buildAudioFadeVolumeExpression = (clipDuration, fadeIn, fadeOut, clipOffse
   return `${formatFilterNumber(baseGain)}*(${fadeExpr})`
 }
 
+// Ask the running export worker to cancel its job. The worker aborts its
+// export signal and reports "Export cancelled" through the normal error
+// path; if the worker is already gone this is a no-op.
+ipcMain.handle('export:cancel', async () => {
+  if (!exportWorkerWindow || exportWorkerWindow.isDestroyed()) {
+    return { success: true, cancelled: false }
+  }
+  try {
+    exportWorkerWindow.webContents.send('export:cancel-job')
+    return { success: true, cancelled: true }
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) }
+  }
+})
+
 ipcMain.handle('export:mixAudio', async (event, options = {}) => {
-  if (!ffmpegPath) {
-    return { success: false, error: 'FFmpeg binary not available.' }
+  const mixFfmpegUnavailable = getFfmpegUnavailableError()
+  if (mixFfmpegUnavailable) {
+    return { success: false, error: mixFfmpegUnavailable }
   }
 
   const {
@@ -5410,9 +5669,14 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
     tracks = [],
     assets = [],
     timeoutMs = 180000,
+    // Dry run: apply the exact per-clip filter below and report the ledger
+    // without touching FFmpeg. The exporter calls this before rendering a
+    // single frame so a doomed mix fails in seconds, not after an hour of
+    // frame encoding (the "38 of 50 clips after 95 minutes" incident).
+    validateOnly = false,
   } = options
 
-  if (!outputPath) {
+  if (!outputPath && !validateOnly) {
     return { success: false, error: 'Missing output path for audio mix.' }
   }
 
@@ -5429,18 +5693,51 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
   const assetMap = new Map((assets || []).map((asset) => [asset.id, asset]))
   const preparedInputs = []
 
+  // Skip ledger (the captions mixer's mold): every excluded clip gets a
+  // reason. `problem: true` marks exclusions the exporter's strict
+  // clip-count check should surface BY NAME — a reversed or out-of-range
+  // clip is expected to be absent; a clip whose file can't be found is a
+  // broken export the user needs file names to fix.
+  const skipped = []
+  const describeClipAsset = (clip) => {
+    const asset = assetMap.get(clip?.assetId)
+    return asset?.name
+      || (asset?.path ? String(asset.path).split(/[\\/]/).pop() : null)
+      || (clip?.url ? String(clip.url).split(/[\\/]/).pop() : null)
+      || clip?.assetId
+      || clip?.id
+      || 'unknown clip'
+  }
+  const skip = (clip, reason, problem = false, attemptedPath = null) => {
+    skipped.push({
+      clipId: clip?.id,
+      assetName: describeClipAsset(clip),
+      reason,
+      problem,
+      path: attemptedPath,
+    })
+  }
+
   for (const clip of clips || []) {
-    if (!clip || clip.type !== 'audio') continue
+    if (!clip || clip.type !== 'audio') { if (clip) skip(clip, 'not-an-audio-clip'); continue }
     const track = trackMap.get(clip.trackId)
-    if (!track || track.type !== 'audio' || track.muted || track.visible === false) continue
-    if (clip.reverse) continue // Matches timeline preview behavior (reverse audio is silent).
+    if (!track || track.type !== 'audio' || track.muted || track.visible === false) {
+      // The renderer only sends clips on audible audio tracks, so landing
+      // here means renderer/main disagree — count it as a problem.
+      skip(clip, 'track-not-audible', true)
+      continue
+    }
+    if (clip.reverse) { skip(clip, 'reverse'); continue } // Matches timeline preview behavior (reverse audio is silent).
 
     const asset = assetMap.get(clip.assetId)
-    if (!asset) continue
+    if (!asset) { skip(clip, 'missing-asset-record', true); continue }
 
     let inputPath = null
     if (asset.path && projectPath) {
-      inputPath = path.join(projectPath, asset.path)
+      // Relinked assets (manual or auto-relink) store an ABSOLUTE path;
+      // joining it onto the project folder makes garbage and the clip gets
+      // silently dropped from the mix. Only project-relative paths join.
+      inputPath = path.isAbsolute(asset.path) ? asset.path : path.join(projectPath, asset.path)
     }
     if (!inputPath && asset.url) {
       inputPath = resolveMediaInputPath(asset.url)
@@ -5448,26 +5745,29 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
     if (!inputPath && clip.url) {
       inputPath = resolveMediaInputPath(clip.url)
     }
-    if (!inputPath || !fsSync.existsSync(inputPath)) continue
+    if (!inputPath || !fsSync.existsSync(inputPath)) {
+      skip(clip, 'file-not-found', true, inputPath || asset.path || null)
+      continue
+    }
 
     const clipStart = Number(clip.startTime) || 0
     const clipDuration = Math.max(0, Number(clip.duration) || 0)
-    if (clipDuration <= 0.000001) continue
+    if (clipDuration <= 0.000001) { skip(clip, 'zero-duration'); continue }
     const clipEnd = clipStart + clipDuration
 
     const visibleStart = Math.max(rangeStartSec, clipStart)
     const visibleEnd = Math.min(rangeEndSec, clipEnd)
-    if (visibleEnd <= visibleStart) continue
+    if (visibleEnd <= visibleStart) { skip(clip, 'outside-range'); continue }
 
     const clipOffsetOnTimeline = visibleStart - clipStart
     const timeScale = getExportClipTimeScale(clip)
-    if (!Number.isFinite(timeScale) || timeScale <= 0) continue
+    if (!Number.isFinite(timeScale) || timeScale <= 0) { skip(clip, 'invalid-time-scale', true); continue }
 
     const trimStart = Math.max(0, Number(clip.trimStart) || 0)
     const sourceOffsetSec = Math.max(0, trimStart + clipOffsetOnTimeline * timeScale)
     const timelineVisibleSec = visibleEnd - visibleStart
     const sourceDurationSec = Math.max(0, timelineVisibleSec * timeScale)
-    if (sourceDurationSec <= 0.000001) continue
+    if (sourceDurationSec <= 0.000001) { skip(clip, 'zero-source-duration', true); continue }
 
     const delayMs = Math.max(0, Math.round((visibleStart - rangeStartSec) * 1000))
     preparedInputs.push({
@@ -5487,8 +5787,12 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
     })
   }
 
+  if (validateOnly) {
+    return { success: true, validateOnly: true, clipCount: preparedInputs.length, skipped }
+  }
+
   if (preparedInputs.length === 0) {
-    return { success: false, error: 'No eligible audio clips for mix.' }
+    return { success: false, error: 'No eligible audio clips for mix.', skipped }
   }
 
   try {
@@ -5509,10 +5813,12 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
   const inputFilters = []
   const mixLabels = []
   preparedInputs.forEach((entry, index) => {
+    // No atempo at unity rate: ffmpeg 6.1.1 amix silently truncates the whole
+    // mix at input 0's delay when that input's chain has atempo before adelay.
     const filters = [
       `atrim=start=${formatFilterNumber(entry.sourceOffsetSec)}:duration=${formatFilterNumber(entry.sourceDurationSec)}`,
       'asetpts=PTS-STARTPTS',
-      ...buildAtempoFilterChain(entry.timeScale),
+      ...(Math.abs(entry.timeScale - 1) > 0.000001 ? buildAtempoFilterChain(entry.timeScale) : []),
     ]
 
     if (entry.forceMono) {
@@ -5553,9 +5859,23 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
   // normalize=0: sum inputs as-is. amix's default input normalization would
   // duck the mix as the number of live inputs changes — the preview graph
   // (and the OfflineAudioContext fallback) sum without scaling.
-  const finalMixFilter = mixLabels.length === 1
-    ? `${mixLabels[0]}atrim=duration=${formatFilterNumber(totalDuration)},asetpts=PTS-STARTPTS${masterFilter}[outa]`
-    : `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:dropout_transition=0:normalize=0,atrim=duration=${formatFilterNumber(totalDuration)},asetpts=PTS-STARTPTS${masterFilter}[outa]`
+  // A timeline mix must always span the complete delivery range. atrim only
+  // shortens audio; it does not append silence. Without apad, sparse stems can
+  // end before their delayed clips and are then started at zero by the Web
+  // Audio insert-effects pass, which drops later cues and reverb tails.
+  const padAndTrim = `apad=whole_dur=${formatFilterNumber(totalDuration)},atrim=duration=${formatFilterNumber(totalDuration)},asetpts=PTS-STARTPTS`
+  // Keep a generated full-range silence bed in the graph. It contributes no
+  // sound, but makes the output duration deterministic for sparse and delayed
+  // clips even when an input decoder reports an early EOF timestamp.
+  // The bed must be amix input 0: the ffmpeg 6.1.1 truncation bug keys off the
+  // FIRST input's chain, and the bed (no atempo/adelay) can never trigger it —
+  // this also shields speed-ramped clips, which legitimately keep atempo.
+  const silenceLabel = 'mixsilence'
+  inputFilters.push(
+    `anullsrc=r=${normalizedSampleRate}:cl=${normalizedChannels === 1 ? 'mono' : 'stereo'}:d=${formatFilterNumber(totalDuration)}[${silenceLabel}]`
+  )
+  const allMixLabels = [`[${silenceLabel}]`, ...mixLabels]
+  const finalMixFilter = `${allMixLabels.join('')}amix=inputs=${allMixLabels.length}:duration=longest:dropout_transition=0:normalize=0,${padAndTrim}${masterFilter}[outa]`
   const filterComplex = `${inputFilters.join(';')};${finalMixFilter}`
 
   args.push(
@@ -5585,14 +5905,117 @@ ipcMain.handle('export:mixAudio', async (event, options = {}) => {
       resolve({ success: false, error: err.message })
     })
 
-    ffmpeg.on('close', (code) => {
+    ffmpeg.on('close', async (code) => {
       clearTimeout(timeoutHandle)
       if (killedByTimeout) {
         resolve({ success: false, error: `Audio mix timed out after ${Math.round(normalizedTimeout / 1000)}s` })
         return
       }
       if (code === 0) {
-        resolve({ success: true, clipCount: preparedInputs.length })
+        const outputDuration = await probeAudioDurationSeconds(outputPath)
+        const durationTolerance = Math.max(0.02, 2 / normalizedSampleRate)
+        if (Number.isFinite(outputDuration) && outputDuration + durationTolerance < totalDuration) {
+          resolve({
+            success: false,
+            error: `Audio mix ended early at ${outputDuration.toFixed(3)}s (expected ${totalDuration.toFixed(3)}s).`,
+            clipCount: preparedInputs.length,
+            outputDuration,
+            expectedDuration: totalDuration,
+          })
+          return
+        }
+        resolve({
+          success: true,
+          clipCount: preparedInputs.length,
+          outputDuration,
+          expectedDuration: totalDuration,
+          skipped,
+        })
+        return
+      }
+      resolve({ success: false, error: stderr || `FFmpeg exited with code ${code}` })
+    })
+  })
+})
+
+// Encode a mixed WAV into a delivery audio format (the audio-only export).
+// Deliberately separate from export:mixAudio so the mix graph stays byte-
+// identical between video and audio-only exports; this is a plain
+// single-input encode.
+ipcMain.handle('export:encodeAudioFile', async (event, options = {}) => {
+  const encodeFfmpegUnavailable = getFfmpegUnavailableError()
+  if (encodeFfmpegUnavailable) {
+    return { success: false, error: encodeFfmpegUnavailable }
+  }
+
+  const {
+    inputPath,
+    outputPath,
+    audioCodec = 'aac', // 'aac' | 'mp3' — WAV deliveries never reach this handler
+    audioBitrateKbps = 192,
+    audioSampleRate = 44100,
+    audioChannels = 2,
+    normalizeAudio = false,
+    loudnessTarget = -14,
+    timeoutMs = 180000,
+  } = options
+
+  if (!inputPath || !outputPath) {
+    return { success: false, error: 'Missing input or output path for audio encode.' }
+  }
+  if (!fsSync.existsSync(inputPath)) {
+    return { success: false, error: `Mixed audio file not found: ${inputPath}` }
+  }
+  try {
+    await fs.mkdir(path.dirname(outputPath), { recursive: true })
+  } catch (err) {
+    return { success: false, error: err.message || 'Failed to prepare audio output folder.' }
+  }
+
+  const args = ['-y', '-i', inputPath]
+  if (normalizeAudio) {
+    const target = Math.max(-30, Math.min(-9, Math.round(Number(loudnessTarget) || -14)))
+    args.push('-af', `loudnorm=I=${target}:TP=-1.5:LRA=11`)
+  }
+  if (audioCodec === 'wav') {
+    // Lossless delivery — reached only when loudness normalization runs on
+    // a WAV target (otherwise the mix writes the WAV directly).
+    args.push('-c:a', 'pcm_s16le')
+  } else {
+    args.push('-c:a', audioCodec === 'mp3' ? 'libmp3lame' : 'aac')
+    args.push('-b:a', `${Math.max(64, Math.min(320, Math.round(Number(audioBitrateKbps) || 192)))}k`)
+  }
+  args.push('-ar', String(Math.max(8000, Math.min(192000, Math.round(Number(audioSampleRate) || 44100)))))
+  args.push('-ac', String(Math.max(1, Math.min(2, Math.round(Number(audioChannels) || 2)))))
+  args.push(outputPath)
+
+  const normalizedEncodeTimeout = Math.max(30000, Math.round(Number(timeoutMs) || 180000))
+  return await new Promise((resolve) => {
+    const ffmpeg = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    let killedByTimeout = false
+    const timeoutHandle = setTimeout(() => {
+      killedByTimeout = true
+      ffmpeg.kill('SIGKILL')
+    }, normalizedEncodeTimeout)
+
+    ffmpeg.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    ffmpeg.on('error', (err) => {
+      clearTimeout(timeoutHandle)
+      resolve({ success: false, error: err.message })
+    })
+
+    ffmpeg.on('close', (code) => {
+      clearTimeout(timeoutHandle)
+      if (killedByTimeout) {
+        resolve({ success: false, error: `Audio encode timed out after ${Math.round(normalizedEncodeTimeout / 1000)}s` })
+        return
+      }
+      if (code === 0) {
+        resolve({ success: true, outputPath })
         return
       }
       resolve({ success: false, error: stderr || `FFmpeg exited with code ${code}` })
@@ -5626,6 +6049,21 @@ function appendExportVideoEncoderArgs(args, options = {}) {
   // (Apple Silicon / T2 media engine). Availability is gated up front by
   // the export:checkNvenc IPC, mirroring the NVENC flow.
   const useVideoToolbox = useHardwareEncoder && process.platform === 'darwin'
+
+  // Color management: both export paths hand ffmpeg full-range RGB(A)
+  // frames. Left alone, swscale converts RGB->YUV with its default BT.601
+  // coefficients and writes no colour metadata — HD players assume BT.709,
+  // so exports played back slightly shifted and untagged uploads got
+  // re-guessed by every transcode. Pin the conversion matrix to BT.709 and
+  // tag the stream to match (tags without the matrix would lie about the
+  // pixels).
+  args.push(
+    '-vf', 'scale=out_color_matrix=bt709:out_range=tv',
+    '-color_primaries', 'bt709',
+    '-color_trc', 'bt709',
+    '-colorspace', 'bt709',
+    '-color_range', 'tv'
+  )
 
   let encoderUsed = null
   const isProRes = videoCodec === 'prores' || (format === 'mov' && options.proresProfile != null)
@@ -5762,7 +6200,11 @@ function appendExportVideoEncoderArgs(args, options = {}) {
   }
 
   if (format === 'mp4') {
-    args.push('-movflags', '+faststart')
+    // write_colr puts the colr atom in the container as well — QuickTime
+    // and some upload pipelines trust it over the bitstream VUI.
+    args.push('-movflags', '+faststart+write_colr')
+  } else if (format === 'mov') {
+    args.push('-movflags', '+write_colr')
   }
 
   return encoderUsed
@@ -5797,6 +6239,226 @@ const appendLimitedStderr = (current, data) => {
   return next.length > 24000 ? next.slice(-24000) : next
 }
 
+ipcMain.handle('export:prepareVideoSource', async (event, options = {}) => {
+  const inputPath = typeof options.inputPath === 'string' ? options.inputPath.trim() : ''
+  const outputPath = typeof options.outputPath === 'string' ? options.outputPath.trim() : ''
+  // 'remux' (default) stream-copies non-faststart containers for the
+  // sequential decoder. 'transcode' re-encodes sources whose codec the
+  // renderer cannot decode at all (ProRes, DNx, ...) into an H.264
+  // intermediate — reuse is never valid there, however streamable the file.
+  const mode = options.mode === 'transcode' ? 'transcode' : 'remux'
+  const prepareFfmpegUnavailable = getFfmpegUnavailableError()
+  if (prepareFfmpegUnavailable) {
+    return { success: false, error: prepareFfmpegUnavailable }
+  }
+  if (!inputPath || !outputPath) {
+    return { success: false, error: 'Missing source-preparation inputs.' }
+  }
+  const resolvedInputPath = path.resolve(inputPath)
+  const resolvedOutputPath = path.resolve(outputPath)
+  const samePath = process.platform === 'win32'
+    ? resolvedInputPath.toLowerCase() === resolvedOutputPath.toLowerCase()
+    : resolvedInputPath === resolvedOutputPath
+  if (samePath) {
+    return { success: false, error: 'Prepared source must use a different output path.' }
+  }
+
+  let layout = null
+  if (mode === 'remux') {
+    try {
+      layout = await inspectIsoBmffLayout(inputPath)
+      if (layout.streamable) {
+        return {
+          success: true,
+          prepared: false,
+          inputPath,
+          layout: {
+            fileSize: layout.fileSize,
+            moovOffset: layout.moovOffset,
+            mdatOffset: layout.mdatOffset,
+          },
+        }
+      }
+    } catch (err) {
+      console.warn('[Export] Could not inspect long source container; attempting stream-copy preparation:', err.message)
+    }
+  }
+
+  await fs.mkdir(path.dirname(outputPath), { recursive: true })
+  const tempOutputPath = path.join(
+    path.dirname(outputPath),
+    `.${path.basename(outputPath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp.mp4`
+  )
+  const args = mode === 'transcode'
+    ? [
+      '-y',
+      '-i', inputPath,
+      '-map', '0:v:0',
+      // Visually transparent for the current pipeline: compositing and the
+      // frame pipe are 8-bit RGBA end to end, so CRF 12 4:2:0 discards
+      // nothing this export could have kept from a 10-bit 4:2:2 mezzanine.
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '12',
+      '-pix_fmt', 'yuv420p',
+      '-an',
+      '-sn',
+      '-dn',
+      '-movflags', '+faststart',
+      tempOutputPath,
+    ]
+    : [
+      '-y',
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-c:v', 'copy',
+      '-an',
+      '-sn',
+      '-dn',
+      '-movflags', '+faststart',
+      tempOutputPath,
+    ]
+
+  return await new Promise((resolve) => {
+    const ffmpeg = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    let settled = false
+
+    const finish = async (payload) => {
+      if (settled) return
+      settled = true
+      if (!payload?.success) {
+        try { await fs.unlink(tempOutputPath) } catch { /* ignore */ }
+      }
+      resolve(payload)
+    }
+
+    ffmpeg.stderr.on('data', (data) => {
+      stderr = appendLimitedStderr(stderr, data)
+    })
+
+    ffmpeg.on('error', (err) => {
+      finish({ success: false, error: err.message })
+    })
+
+    ffmpeg.on('close', async (code) => {
+      if (code !== 0) {
+        await finish({
+          success: false,
+          error: stderr || `FFmpeg exited with code ${code}`,
+          layout,
+        })
+        return
+      }
+
+      const outputProbe = await probeVideoInfo(tempOutputPath)
+      if (!outputProbe?.success || !outputProbe?.hasVideo) {
+        await finish({
+          success: false,
+          error: outputProbe?.error || 'Prepared source validation failed.',
+          layout,
+        })
+        return
+      }
+
+      try {
+        try { await fs.unlink(outputPath) } catch { /* output did not exist */ }
+        await fs.rename(tempOutputPath, outputPath)
+        await finish({
+          success: true,
+          prepared: true,
+          outputPath,
+          videoCodec: outputProbe.videoCodec || null,
+          layout,
+        })
+      } catch (err) {
+        await finish({ success: false, error: err.message || 'Could not finalize prepared source.' })
+      }
+    })
+  })
+})
+
+// Hardware-encoder availability can't be trusted from a listing check alone:
+// ffmpeg-static builds differ per platform (the Linux build ships without
+// NVENC entirely), and a listed encoder can still fail to initialize on
+// driver/API mismatches ("Required: 13.1 Found: 13.0"). The only reliable
+// answer is a real one-frame encode, so probe with lavfi input and cache the
+// result (as a promise, so concurrent callers share one probe) per app run.
+const hardwareEncoderProbeCache = new Map()
+
+function probeHardwareEncoder(encoderName) {
+  const cached = hardwareEncoderProbeCache.get(encoderName)
+  if (cached) return cached
+  const probe = new Promise((resolve) => {
+    if (!ffmpegPath) {
+      resolve({ ok: false, error: 'FFmpeg binary not available.' })
+      return
+    }
+    const args = [
+      '-hide_banner', '-v', 'error',
+      '-f', 'lavfi', '-i', 'color=black:size=256x256:rate=30',
+      '-frames:v', '1',
+      '-c:v', encoderName,
+      '-f', 'null', '-',
+    ]
+    const child = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    // A wedged probe must not wedge the exports queued behind it.
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+      finish({ ok: false, error: `Hardware encoder probe timed out (${encoderName}).` })
+    }, 15000)
+    child.stderr.on('data', (data) => {
+      stderr = appendLimitedStderr(stderr, data)
+    })
+    child.on('error', (err) => finish({ ok: false, error: err.message }))
+    child.on('close', (code) => {
+      if (code === 0) {
+        finish({ ok: true })
+      } else {
+        finish({ ok: false, error: (stderr || `FFmpeg exited with code ${code}`).trim() })
+      }
+    })
+  })
+  hardwareEncoderProbeCache.set(encoderName, probe)
+  return probe
+}
+
+// When an export requests hardware encoding, verify the encoder actually
+// initializes before ffmpeg is spawned with it; otherwise flip the request to
+// the software encoder and report what happened so callers can say so out
+// loud instead of stalling (issue #83: Linux ffmpeg-static has no NVENC, and
+// the MCP export path passes useHardwareEncoder through unchecked). Mutates
+// options — both encode handlers pass options straight through to
+// appendExportVideoEncoderArgs. Returns null when hardware is unused,
+// software-only (ProRes/VP9/alpha), or healthy.
+async function resolveHardwareEncoderDowngrade(options = {}) {
+  if (!options.useHardwareEncoder) return null
+  const isProRes = options.videoCodec === 'prores' || (options.format === 'mov' && options.proresProfile != null)
+  const isVp9 = options.format === 'webm' || options.videoCodec === 'vp9'
+  if (isProRes || isVp9 || options.alpha) return null
+  const isMac = process.platform === 'darwin'
+  const isH265 = options.videoCodec === 'h265'
+  const encoderName = isMac
+    ? (isH265 ? 'hevc_videotoolbox' : 'h264_videotoolbox')
+    : (isH265 ? 'hevc_nvenc' : 'h264_nvenc')
+  const probe = await probeHardwareEncoder(encoderName)
+  if (probe.ok) return null
+  options.useHardwareEncoder = false
+  return {
+    requestedEncoder: encoderName,
+    fallbackEncoder: isH265 ? 'libx265' : 'libx264',
+    reason: probe.error || 'Hardware encoder failed to initialize.',
+  }
+}
+
 ipcMain.handle('export:encodeVideo', async (event, options = {}) => {
   const {
     framePattern,
@@ -5810,11 +6472,17 @@ ipcMain.handle('export:encodeVideo', async (event, options = {}) => {
     audioSampleRate = 44100
   } = options
 
-  if (!ffmpegPath) {
-    return { success: false, error: 'FFmpeg binary not available.' }
+  const encodeFfmpegUnavailable = getFfmpegUnavailableError()
+  if (encodeFfmpegUnavailable) {
+    return { success: false, error: encodeFfmpegUnavailable }
   }
   if (!framePattern || !outputPath) {
     return { success: false, error: 'Missing export inputs.' }
+  }
+
+  const hardwareFallback = await resolveHardwareEncoderDowngrade(options)
+  if (hardwareFallback) {
+    console.warn(`[Export] ${hardwareFallback.requestedEncoder} unavailable (${hardwareFallback.reason}); using ${hardwareFallback.fallbackEncoder}.`)
   }
 
   const args = ['-y', '-framerate', String(fps), '-i', framePattern]
@@ -5836,7 +6504,7 @@ ipcMain.handle('export:encodeVideo', async (event, options = {}) => {
   }
 
   args.push(outputPath)
-  console.log(`[Export] Encoding with ${encoderUsed} (${useHardwareEncoder ? 'hardware' : 'software'})`)
+  console.log(`[Export] Encoding with ${encoderUsed} (${options.useHardwareEncoder ? 'hardware' : 'software'})`)
 
   return await new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegPath, args, { windowsHide: true })
@@ -5852,9 +6520,9 @@ ipcMain.handle('export:encodeVideo', async (event, options = {}) => {
 
     ffmpeg.on('close', (code) => {
       if (code === 0) {
-        resolve({ success: true, encoderUsed })
+        resolve({ success: true, encoderUsed, ...(hardwareFallback ? { hardwareFallback } : {}) })
       } else {
-        resolve({ success: false, error: stderr || `FFmpeg exited with code ${code}`, encoderUsed })
+        resolve({ success: false, error: stderr || `FFmpeg exited with code ${code}`, encoderUsed, ...(hardwareFallback ? { hardwareFallback } : {}) })
       }
     })
   })
@@ -5870,11 +6538,17 @@ ipcMain.handle('export:startFramePipe', async (event, options = {}) => {
     duration = null,
   } = options
 
-  if (!ffmpegPath) {
-    return { success: false, error: 'FFmpeg binary not available.' }
+  const pipeFfmpegUnavailable = getFfmpegUnavailableError()
+  if (pipeFfmpegUnavailable) {
+    return { success: false, error: pipeFfmpegUnavailable, code: 'ffmpeg-missing' }
   }
   if (!width || !height || !outputPath) {
     return { success: false, error: 'Missing frame pipe inputs.' }
+  }
+
+  const hardwareFallback = await resolveHardwareEncoderDowngrade(options)
+  if (hardwareFallback) {
+    console.warn(`[Export] ${hardwareFallback.requestedEncoder} unavailable (${hardwareFallback.reason}); using ${hardwareFallback.fallbackEncoder}.`)
   }
 
   const args = [
@@ -5933,6 +6607,32 @@ ipcMain.handle('export:startFramePipe', async (event, options = {}) => {
     })
   })
 
+  // Failed spawns (missing/blocked binary) emit 'error' + 'close' and never
+  // 'spawn' — don't report the pipe live until one of them fires.
+  const startup = await new Promise((resolve) => {
+    const settle = (result) => {
+      ffmpeg.off('spawn', onSpawn)
+      ffmpeg.off('error', onError)
+      ffmpeg.off('close', onClose)
+      resolve(result)
+    }
+    const onSpawn = () => settle({ ok: true })
+    const onError = (err) => settle({ ok: false, reason: err?.message || String(err) })
+    const onClose = (code) => settle({ ok: false, reason: `FFmpeg exited with code ${code} before accepting frames` })
+    ffmpeg.once('spawn', onSpawn)
+    ffmpeg.once('error', onError)
+    ffmpeg.once('close', onClose)
+  })
+  if (!startup.ok) {
+    console.error(`[Export] Frame pipe FFmpeg failed to start (${ffmpegPath}): ${startup.reason}`)
+    return {
+      success: false,
+      error: `FFmpeg could not start (${ffmpegPath}): ${startup.reason}`,
+      code: 'spawn-failed',
+      encoderUsed,
+    }
+  }
+
   activeFramePipeExports.set(sessionId, {
     ffmpeg,
     closePromise,
@@ -5944,7 +6644,7 @@ ipcMain.handle('export:startFramePipe', async (event, options = {}) => {
   })
 
   console.log(`[Export] Frame pipe started with ${encoderUsed} (${options.useHardwareEncoder ? 'hardware' : 'software'})`)
-  return { success: true, sessionId, encoderUsed }
+  return { success: true, sessionId, encoderUsed, ...(hardwareFallback ? { hardwareFallback } : {}) }
 })
 
 ipcMain.handle('export:writeFrameToPipe', async (event, sessionId, frameBuffer) => {
@@ -5953,9 +6653,11 @@ ipcMain.handle('export:writeFrameToPipe', async (event, sessionId, frameBuffer) 
     return { success: false, error: 'Frame pipe session not found.' }
   }
   if (session.getClosed()) {
+    const spawnErr = session.getError()
     return {
       success: false,
-      error: session.getStderr() || `Frame pipe closed with code ${session.getCloseCode()}`,
+      error: session.getStderr()
+        || (spawnErr ? (spawnErr.message || String(spawnErr)) : `Frame pipe closed with code ${session.getCloseCode()}`),
     }
   }
   if (!frameBuffer) {
@@ -6045,8 +6747,9 @@ ipcMain.handle('export:muxAudioVideo', async (event, options = {}) => {
     audioSampleRate = 44100,
   } = options
 
-  if (!ffmpegPath) {
-    return { success: false, error: 'FFmpeg binary not available.' }
+  const muxFfmpegUnavailable = getFfmpegUnavailableError()
+  if (muxFfmpegUnavailable) {
+    return { success: false, error: muxFfmpegUnavailable }
   }
   if (!videoPath || !outputPath) {
     return { success: false, error: 'Missing mux inputs.' }
@@ -6087,9 +6790,28 @@ ipcMain.handle('export:muxAudioVideo', async (event, options = {}) => {
       resolve({ success: false, error: err.message })
     })
 
-    ffmpeg.on('close', (code) => {
+    ffmpeg.on('close', async (code) => {
       if (code === 0) {
-        resolve({ success: true })
+        const outputDuration = audioPath
+          ? await probeAudioDurationSeconds(outputPath)
+          : null
+        const expectedDuration = Number(duration)
+        const durationTolerance = 0.05
+        if (
+          audioPath
+          && Number.isFinite(expectedDuration)
+          && Number.isFinite(outputDuration)
+          && outputDuration + durationTolerance < expectedDuration
+        ) {
+          resolve({
+            success: false,
+            error: `Muxed audio ended early at ${outputDuration.toFixed(3)}s (expected ${expectedDuration.toFixed(3)}s).`,
+            outputDuration,
+            expectedDuration,
+          })
+          return
+        }
+        resolve({ success: true, outputDuration, expectedDuration })
       } else {
         resolve({ success: false, error: stderr || `FFmpeg exited with code ${code}` })
       }
@@ -6181,6 +6903,46 @@ ipcMain.handle('playback:transcode', async (event, { inputPath, outputPath }) =>
 })
 
 // ============================================
+// Image sequence import (VFX-style numbered frames)
+//
+// Transcode an ordered frame list into an editing intermediate the rest of
+// the app treats as a normal video (transcode-first sequence support). The
+// heavy lifting lives in imageSequenceTranscode.js so it can be exercised
+// from plain node; this handler adds the ffmpeg guard and progress relay.
+// ============================================
+ipcMain.handle('imageSequence:transcode', async (event, options = {}) => {
+  const ffmpegUnavailable = getFfmpegUnavailableError()
+  if (ffmpegUnavailable) {
+    return { success: false, error: ffmpegUnavailable }
+  }
+  const { transcodeImageSequence } = require('./imageSequenceTranscode')
+  try {
+    return await transcodeImageSequence({
+      ffmpegPath,
+      ffprobePath,
+      entries: options.entries,
+      fps: options.fps,
+      outputDir: options.outputDir,
+      baseName: options.baseName,
+      alpha: options.alpha ?? 'auto',
+      applyTrc: options.applyTrc || null,
+      onProgress: (progress) => {
+        try {
+          event.sender.send('imageSequence:progress', {
+            jobId: options.jobId || null,
+            ...progress,
+          })
+        } catch {
+          // Renderer gone mid-transcode; the job finishes regardless.
+        }
+      },
+    })
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) }
+  }
+})
+
+// ============================================
 // Proxy cache (NLE-style: low-res preview proxies)
 //
 // Separate from the playback cache above. The playback cache keeps source
@@ -6253,7 +7015,11 @@ ipcMain.handle('export:checkNvenc', async () => {
     return { available: false, h264: false, h265: false, gpuName, kind, error: 'FFmpeg binary not available.' }
   }
 
-  return await new Promise((resolve) => {
+  // Two-stage check: the -encoders listing says whether the build contains
+  // the encoder at all (the Linux ffmpeg-static build doesn't), then a real
+  // one-frame probe catches builds where it's listed but can't initialize
+  // (driver/API-version mismatches). Only the probe result is authoritative.
+  const listing = await new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true })
     let output = ''
 
@@ -6265,21 +7031,44 @@ ipcMain.handle('export:checkNvenc', async () => {
     })
 
     ffmpeg.on('error', (err) => {
-      resolve({ available: false, h264: false, h265: false, gpuName, kind, error: err.message })
+      resolve({ h264: false, h265: false, error: err.message })
     })
 
     ffmpeg.on('close', () => {
-      const hasH264 = isMac ? output.includes('h264_videotoolbox') : output.includes('h264_nvenc')
-      const hasH265 = isMac ? output.includes('hevc_videotoolbox') : output.includes('hevc_nvenc')
       resolve({
-        available: hasH264 || hasH265,
-        h264: hasH264,
-        h265: hasH265,
-        gpuName,
-        kind,
+        h264: isMac ? output.includes('h264_videotoolbox') : output.includes('h264_nvenc'),
+        h265: isMac ? output.includes('hevc_videotoolbox') : output.includes('hevc_nvenc'),
+        error: null,
       })
     })
   })
+
+  if (listing.error) {
+    return { available: false, h264: false, h265: false, gpuName, kind, error: listing.error }
+  }
+
+  let h264 = false
+  let h265 = false
+  let probeError = null
+  if (listing.h264) {
+    const probe = await probeHardwareEncoder(isMac ? 'h264_videotoolbox' : 'h264_nvenc')
+    h264 = probe.ok
+    if (!probe.ok) probeError = probe.error
+  }
+  if (listing.h265) {
+    const probe = await probeHardwareEncoder(isMac ? 'hevc_videotoolbox' : 'hevc_nvenc')
+    h265 = probe.ok
+    if (!probe.ok && !probeError) probeError = probe.error
+  }
+
+  return {
+    available: h264 || h265,
+    h264,
+    h265,
+    gpuName,
+    kind,
+    ...(probeError && !h264 && !h265 ? { error: probeError } : {}),
+  }
 })
 
 // ============================================

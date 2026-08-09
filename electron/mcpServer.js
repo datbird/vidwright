@@ -33,6 +33,7 @@ const MCP_ACTION_PLAN_WRITABLE_TOOLS = new Set([
   'import_asset_from_path',
   'relink_asset',
   'set_clip_style',
+  'set_clip_mask',
   'set_clip_label_color',
   'set_clips_enabled',
   'add_timeline_markers',
@@ -74,7 +75,25 @@ const MCP_ACTION_PLAN_WRITABLE_TOOLS = new Set([
   'set_clip_keyframes',
   'add_dip_to_black',
   'generate_music',
+  'configure_music_video',
+  'update_music_video_session',
+  'manage_music_video_cast',
+  'queue_music_video_character_asset',
+  'manage_music_video_pass',
+  'set_music_video_director_script',
+  'update_music_video_shot',
+  'queue_music_video_keyframes',
+  'queue_music_video_videos',
+  'replace_music_video_keyframe',
+  'replace_music_video_video',
+  'transcribe_music_video_audio',
+  'assemble_music_video_timeline',
+  'replace_music_video_timeline_shot',
+  'save_project',
+  'regenerate_music_video_keyframe',
+  'regenerate_music_video_video',
   'queue_timeline_template_generation',
+  'queue_h3_reference_video',
   'export_timeline',
   'export_delivery_batch',
   'export_fcpxml',
@@ -120,17 +139,41 @@ const MCP_PROMPT_BATCH_WORKFLOW_ALIASES = new Map([
   ['seedance2t2v', 'seedance2-t2v'],
   ['seedancet2v', 'seedance2-t2v'],
   ['seedance', 'seedance2-t2v'],
+  ['seedance2minit2v', 'seedance2-mini-t2v'],
+  ['seedanceminit2v', 'seedance2-mini-t2v'],
+  ['seedancemini', 'seedance2-mini-t2v'],
+  ['seedance2mini', 'seedance2-mini-t2v'],
+  ['seedance2minir2v', 'seedance2-mini-r2v'],
+  ['seedanceminireference', 'seedance2-mini-r2v'],
+  ['seedanceminiref', 'seedance2-mini-r2v'],
   ['seedance2r2v', 'seedance2-r2v'],
   ['seedancer2v', 'seedance2-r2v'],
   ['seedancereference', 'seedance2-r2v'],
   ['seedanceref', 'seedance2-r2v'],
   ['seedanceugc', 'seedance2-r2v'],
+  ['minimaxh3', 'minimax-h3-r2v'],
+  ['h3', 'minimax-h3-r2v'],
+  ['minimaxh3r2v', 'minimax-h3-r2v'],
+  ['h3reference', 'minimax-h3-r2v'],
+  ['imageedit', 'image-edit'],
+  ['qwenimageedit', 'image-edit'],
+  ['qwenimageedit2509', 'image-edit'],
 ])
 const MCP_PROMPT_BATCH_SUPPORTED_WORKFLOWS = new Map([
   ['z-image-turbo', {
     label: 'Z Image Turbo',
     category: 'image',
     outputType: 'image',
+    defaultResolution: { width: 1280, height: 720 },
+  }],
+  ['image-edit', {
+    label: 'Image Edit (Qwen)',
+    category: 'image',
+    outputType: 'image',
+    // Needs a per-job input image, so it is only reachable via the jobs[]
+    // form with assetFieldIds.image — the workflows[] cartesian form has no
+    // way to carry per-job assets.
+    requiresInputImage: true,
     defaultResolution: { width: 1280, height: 720 },
   }],
   ['longcat-text-to-image', {
@@ -187,6 +230,22 @@ const MCP_PROMPT_BATCH_SUPPORTED_WORKFLOWS = new Map([
     defaultFps: 24,
     defaultResolution: { width: 1280, height: 720 },
   }],
+  ['seedance2-mini-t2v', {
+    label: 'Seedance 2.0 Mini Text to Video',
+    category: 'video',
+    outputType: 'video',
+    defaultDurationSeconds: 5,
+    defaultFps: 24,
+    defaultResolution: { width: 1280, height: 720 },
+  }],
+  ['seedance2-mini-r2v', {
+    label: 'Seedance 2.0 Mini Reference + Audio Guide',
+    category: 'video',
+    outputType: 'video',
+    defaultDurationSeconds: 5,
+    defaultFps: 24,
+    defaultResolution: { width: 720, height: 1280 },
+  }],
   ['seedance2-r2v', {
     label: 'Seedance 2.0 Reference to Video',
     category: 'video',
@@ -194,6 +253,14 @@ const MCP_PROMPT_BATCH_SUPPORTED_WORKFLOWS = new Map([
     defaultDurationSeconds: 15,
     defaultFps: 24,
     defaultResolution: { width: 720, height: 1280 },
+  }],
+  ['minimax-h3-r2v', {
+    label: 'MiniMax H3 Reference + Audio to Video',
+    category: 'video',
+    outputType: 'video',
+    defaultDurationSeconds: 5,
+    defaultFps: 24,
+    defaultResolution: { width: 2560, height: 1440 },
   }],
 ])
 const MCP_TRANSITION_TYPES = new Set([
@@ -274,6 +341,15 @@ const MCP_CLIP_KEYFRAME_NUMBER_FIELDS = {
   gamma: [0, -100, 100],
   offset: [0, -100, 100],
   hue: [0, -180, 180],
+  // Whole-mask animation (video/image clips with a shape mask; create one
+  // with set_clip_mask first). Geometry is percent of the clip frame.
+  'shapeMask.centerX': [50, -50, 150],
+  'shapeMask.centerY': [50, -50, 150],
+  'shapeMask.width': [60, 1, 200],
+  'shapeMask.height': [60, 1, 200],
+  'shapeMask.rotation': [0, -180, 180],
+  'shapeMask.cornerRadius': [12, 0, 100],
+  'shapeMask.feather': [5, 0, 50],
 }
 for (const group of ['shadows', 'midtones', 'highlights']) {
   for (const property of ['brightness', 'contrast', 'saturation', 'gain', 'gamma', 'offset']) {
@@ -501,6 +577,7 @@ function trackRef(track) {
     type: track.type || 'unknown',
     visible: track.visible !== false,
     muted: Boolean(track.muted),
+    solo: Boolean(track.solo),
     locked: Boolean(track.locked),
     role: track.role || null,
     channels: track.channels || null,
@@ -1173,9 +1250,24 @@ function resolveAssetTimelinePlacementPlan(snapshot, args = {}) {
   const startSeconds = resolveAssetPlacementStart(timeline, resolvedTrack.track?.id || '', args)
   const requestedDuration = Number(args.durationSeconds ?? args.duration)
   const assetDuration = toFiniteNumber(asset.duration, 0)
+  // Source in/out range (issue #89): when no explicit duration is given, the
+  // clip duration derives from the marked range so partial inserts land at
+  // the right length instead of the full source duration.
+  const sourceInSeconds = Number(args.sourceInSeconds ?? args.sourceIn)
+  const sourceOutSeconds = Number(args.sourceOutSeconds ?? args.sourceOut)
+  const hasSourceIn = Number.isFinite(sourceInSeconds) && sourceInSeconds > 0
+  const sourceRangeDuration = (() => {
+    const start = hasSourceIn ? sourceInSeconds : 0
+    const end = Number.isFinite(sourceOutSeconds) && sourceOutSeconds > start
+      ? sourceOutSeconds
+      : (hasSourceIn && assetDuration > start ? assetDuration : NaN)
+    return Number.isFinite(end) ? end - start : NaN
+  })()
   const durationSeconds = Number.isFinite(requestedDuration) && requestedDuration > 0
     ? roundTime(requestedDuration)
-    : (asset.type === 'image' ? 5 : roundTime(assetDuration || 5))
+    : (Number.isFinite(sourceRangeDuration) && sourceRangeDuration > 0
+      ? roundTime(sourceRangeDuration)
+      : (asset.type === 'image' ? 5 : roundTime(assetDuration || 5)))
   const linkedAudio = buildLinkedAudioPlacementPlan(timeline, asset, args)
 
   return {
@@ -1194,6 +1286,7 @@ function resolveAssetTimelinePlacementPlan(snapshot, args = {}) {
     trackType: resolvedTrack.targetType,
     startSeconds,
     durationSeconds,
+    sourceInSeconds: hasSourceIn ? roundTime(sourceInSeconds) : null,
     linkedAudio: linkedAudio ? {
       ...linkedAudio,
       startSeconds,
@@ -2613,6 +2706,34 @@ function buildAiReviewPasses(snapshot) {
         },
       },
       {
+        id: 'guided_music_video_creation',
+        title: 'Guided Music Video Creation',
+        goal: 'Create a complete, editable Music Video through a collaborative, approval-based conversation using the same Director state as the Vidwright UI.',
+        prompt: 'Start with get_music_video_session and continue from its saved agentSession checkpoint. Work in phases: song, artist/cast, creative direction, director plan, keyframes, videos, edit, and review. Ask focused questions and save the current phase, next question, decisions, and approvals with update_music_video_session. Use import_asset_from_path for new media, configure_music_video for setup, queue_music_video_character_asset plus manage_music_video_cast for people, manage_music_video_pass for alternate performance and b-roll coverage, and set_music_video_director_script to validate and parse each approved script. Use update_music_video_shot for targeted revisions. Always preview generation batches and timeline assembly, show exact targets/workflows, and apply only after explicit approval because generation may start local GPU work or spend cloud credits. Poll generation, inspect results, allow targeted replacement/reruns, then assemble and save. Keep every result editable in the normal Director and timeline UI.',
+        tools: ['get_music_video_session', 'update_music_video_session', 'import_asset_from_path', 'configure_music_video', 'queue_music_video_character_asset', 'manage_music_video_cast', 'manage_music_video_pass', 'set_music_video_director_script', 'get_music_video_plan', 'update_music_video_shot', 'queue_music_video_keyframes', 'inspect_music_video_keyframe', 'replace_music_video_keyframe', 'queue_music_video_videos', 'inspect_music_video_video', 'replace_music_video_video', 'get_generation_status', 'assemble_music_video_timeline', 'replace_music_video_timeline_shot', 'save_project'],
+        safeDefaults: {
+          previewOnlyFirst: true,
+          saveConversationCheckpoint: true,
+          requireApprovalBeforeGeneration: true,
+          requireApprovalBeforeTimelineAssembly: true,
+          useExistingDirectorState: true,
+          keepNormalUiEditable: true,
+        },
+      },
+      {
+        id: 'music_video_keyframe_rerun',
+        title: 'Music Video Shot Rerun',
+        goal: 'Discover, inspect, and regenerate one Music Video Step 4 keyframe or Step 5 video through the active workflow settings.',
+        prompt: 'Call get_music_video_plan first to discover the exact sceneId and shotId, prompts, timing, and missing stages. For Step 4, inspect with inspect_music_video_keyframe, then preview regenerate_music_video_keyframe. For Step 5, inspect with inspect_music_video_video, then preview regenerate_music_video_video. Show the current inputs, selected workflow, routing, active job, and latest result. Apply only after I approve because a rerun may start local GPU work or spend cloud credits. Inspect the same stage again after generation finishes.',
+        tools: ['get_music_video_status', 'get_music_video_plan', 'inspect_music_video_keyframe', 'regenerate_music_video_keyframe', 'inspect_music_video_video', 'regenerate_music_video_video', 'get_generation_status'],
+        safeDefaults: {
+          previewOnlyFirst: true,
+          usesActiveMusicVideoSettings: true,
+          queuesGenerationOnlyAfterApproval: true,
+          inspectAgainAfterCompletion: true,
+        },
+      },
+      {
         id: 'generate_from_timeline_context',
         title: 'Generate From Timeline Context',
         goal: 'Turn the selected clip or current playhead frame into a safe Generate-tab image-to-video/keyframe request, queue an approved multi-workflow variation batch, or run an official ComfyUI template on the source clip.',
@@ -2689,9 +2810,9 @@ function buildAiReviewPasses(snapshot) {
       },
       {
         id: 'fcpxml_interchange',
-        title: 'FCPXML Interchange Pass',
-        goal: 'Export the active Vidwright timeline as FCPXML for Resolve, Final Cut, or Premiere finishing.',
-        prompt: 'Preview the FCPXML export plan first, including the active timeline name, clip count, and output path. After I approve, export the FCPXML to the project renders folder or the path I requested.',
+        title: 'XML Interchange Pass',
+        goal: 'Export the active Vidwright timeline as FCPXML for Resolve/Final Cut or XMEML v5 for Premiere Pro.',
+        prompt: 'Choose fcpxml for Resolve or Final Cut, or premiere for Adobe Premiere Pro. Preview the XML export plan first, including the active timeline name, clip count, format, and output path. After I approve, export the XML to the project renders folder or the path I requested.',
         tools: ['get_project', 'get_timeline', 'export_fcpxml'],
         safeDefaults: {
           previewOnlyFirst: true,
@@ -2741,7 +2862,7 @@ function buildAiReviewPasses(snapshot) {
       'Use export_delivery_batch with previewOnly before rendering multiple versions such as 16:9, square, and vertical from the same range.',
       'Use inspect_export_file after rendering when the user asks whether the file exists, has the expected codec, duration, FPS, or dimensions.',
       'Use run_mcp_action_plan with previewOnly before applying an approved multi-step operation in one checkpointed pass.',
-      'Use export_fcpxml with previewOnly before writing an interchange XML for Resolve, Final Cut, or Premiere.',
+      'Use export_fcpxml with previewOnly before writing interchange XML. Choose format fcpxml for Resolve/Final Cut or premiere for Adobe Premiere Pro.',
     ],
     generatedAt: new Date().toISOString(),
   }
@@ -3773,6 +3894,7 @@ function isClipActiveAtTime(clip, timeSeconds) {
 
 function getTimelineFrameClips(timeline, timeSeconds) {
   const tracks = Array.isArray(timeline?.tracks) ? timeline.tracks : []
+  const anyVideoSolo = tracks.some((track) => track?.type === 'video' && track.solo === true)
   const trackIndexById = new Map(tracks.map((track, index) => [track?.id, index]))
   const trackById = new Map(tracks.map((track) => [track?.id, track]))
   const activeClips = (timeline?.clips || [])
@@ -3785,7 +3907,10 @@ function getTimelineFrameClips(timeline, timeSeconds) {
         trackIndex: trackIndexById.has(clip.trackId) ? trackIndexById.get(clip.trackId) : Number.MAX_SAFE_INTEGER,
       }
     })
-    .filter(({ track }) => track && track.visible !== false && !track.muted)
+    .filter(({ track }) => track
+      && track.visible !== false
+      && !track.muted
+      && (track.type !== 'video' || !anyVideoSolo || track.solo === true))
     .sort((a, b) => a.trackIndex - b.trackIndex || getClipStart(a.clip) - getClipStart(b.clip))
 
   const visualTypes = new Set(['video', 'image', 'text', 'shape'])
@@ -3811,11 +3936,12 @@ function getTimelineFrameClips(timeline, timeSeconds) {
   }
 }
 
-function isVisualTimelineClip(clip, track) {
+function isVisualTimelineClip(clip, track, anyVideoSolo = false) {
   const type = String(clip?.type || '').toLowerCase()
   return track?.type === 'video'
     && track.visible !== false
     && !track.muted
+    && (!anyVideoSolo || track.solo === true)
     && clip?.enabled !== false
     && ['video', 'image', 'text', 'shape'].includes(type)
     && getClipDuration(clip) > 0
@@ -4985,6 +5111,10 @@ function resolvePromptGenerationBatchPlan(_snapshot, args = {}) {
         }
         const prompt = String(job?.prompt || '').trim().slice(0, 5000)
         if (!prompt) throw new Error(`Prompt generation job ${index + 1} is missing prompt text.`)
+        const assetFieldIds = normalizePromptBatchAssetFieldIds(job)
+        if (workflowInfo.requiresInputImage && !assetFieldIds.image && !assetFieldIds.inputImage) {
+          throw new Error(`Workflow "${workflowId}" needs an input image. Provide jobs[].assetFieldIds.image with a Vidwright image asset id.`)
+        }
         return {
           workflowId,
           workflowLabel: String(job?.workflowLabel || workflowInfo.label || workflowId),
@@ -4992,7 +5122,7 @@ function resolvePromptGenerationBatchPlan(_snapshot, args = {}) {
           outputType: workflowInfo.outputType,
           prompt,
           negativePrompt: String(job?.negativePrompt || '').trim().slice(0, 2000),
-          assetFieldIds: normalizePromptBatchAssetFieldIds(job),
+          assetFieldIds,
           generateAudio: Object.prototype.hasOwnProperty.call(job || {}, 'generateAudio')
             ? Boolean(job.generateAudio)
             : undefined,
@@ -5030,6 +5160,15 @@ function resolvePromptGenerationBatchPlan(_snapshot, args = {}) {
   if (promptState.error) return { error: promptState.error }
   const workflowState = normalizePromptBatchWorkflows(args)
   if (workflowState.error) return { error: workflowState.error }
+
+  const inputImageWorkflow = workflowState.entries.find((entry) => (
+    MCP_PROMPT_BATCH_SUPPORTED_WORKFLOWS.get(entry.workflowId)?.requiresInputImage
+  ))
+  if (inputImageWorkflow) {
+    return {
+      error: `Workflow "${inputImageWorkflow.workflowId}" needs a per-job input image. Use the jobs[] form with assetFieldIds.image instead of prompts × workflows.`,
+    }
+  }
 
   const totalJobs = promptState.prompts.length * workflowState.entries.reduce((sum, entry) => sum + entry.variations, 0)
   if (totalJobs > MCP_PROMPT_BATCH_MAX_TOTAL_JOBS) {
@@ -5164,6 +5303,7 @@ function resolveVisibleShotRange(timeline, args = {}) {
 function resolveVisibleShotSamples(timeline, args = {}) {
   const range = resolveVisibleShotRange(timeline, args)
   const tracks = Array.isArray(timeline?.tracks) ? timeline.tracks : []
+  const anyVideoSolo = tracks.some((track) => track?.type === 'video' && track.solo === true)
   const trackById = new Map(tracks.map((track) => [track?.id, track]))
   const fps = range.fps
   const frameDuration = 1 / fps
@@ -5178,7 +5318,7 @@ function resolveVisibleShotSamples(timeline, args = {}) {
 
   for (const clip of timeline?.clips || []) {
     const track = trackById.get(clip?.trackId)
-    if (!isVisualTimelineClip(clip, track)) continue
+    if (!isVisualTimelineClip(clip, track, anyVideoSolo)) continue
     const clipStart = getClipStart(clip)
     const clipEnd = getClipEnd(clip)
     if (clipEnd <= range.startSeconds || clipStart >= range.endSeconds) continue
@@ -7009,8 +7149,43 @@ function createToolDefinitions() {
       },
     },
     {
+      name: 'queue_h3_reference_video',
+      description: 'Preview or queue one MiniMax H3 reference-to-video job from an exact Vidwright image asset and audio asset. Designed for paid hero performance and lip-sync shots. Defaults to previewOnly; applying can spend Comfy credits, so require explicit approval first. No negative prompt is sent.',
+      inputSchema: {
+        type: 'object',
+        required: ['imageAssetId', 'audioAssetId', 'prompt'],
+        properties: {
+          imageAssetId: { type: 'string', description: 'Vidwright image asset ID for the exact first/reference frame.' },
+          audioAssetId: { type: 'string', description: 'Vidwright audio asset ID for the exact performance segment.' },
+          prompt: { type: 'string', description: 'Positive H3 performance prompt. Refer to the connected inputs as Image 1 and Audio 1.' },
+          shotId: { type: 'string', description: 'Optional shot label stored with the queued job for later identification.' },
+          durationSeconds: { type: 'number', description: 'Generation duration, 5-15 whole seconds. Shorter shot audio is generated as 5 seconds and can be trimmed in the edit.' },
+          resolutionTier: { type: 'string', enum: ['768P', '2K'], description: 'H3 output tier. Defaults to 2K.' },
+          aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'], description: 'Output aspect ratio. Defaults to 16:9.' },
+          seed: { type: 'integer', description: 'Optional deterministic seed.' },
+          folderId: { type: 'string', description: 'Optional Vidwright asset-folder ID for the completed result.' },
+          previewOnly: { type: 'boolean', description: 'When true, validates and returns the exact paid-generation plan without queueing. Defaults to true.' },
+          timeoutMs: { type: 'integer', description: 'Renderer response timeout. Defaults to 30000.' },
+        },
+      },
+    },
+    {
+      name: 'get_generation_queue_status',
+      description: 'Return live Vidwright Generate-queue jobs, including queued/running/completed/failed state, progress, prompt IDs, and imported result asset IDs. Filter by workflowId, jobIds, or batchId. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workflowId: { type: 'string' },
+          jobIds: { type: 'array', items: { type: 'string' } },
+          batchId: { type: 'string' },
+          includeDone: { type: 'boolean', description: 'Include completed jobs. Defaults to true.' },
+          limit: { type: 'integer', description: 'Maximum jobs returned. Defaults to 100.' },
+        },
+      },
+    },
+    {
       name: 'queue_prompt_generation_batch',
-      description: 'Preview or queue text-to-image/text-to-video generation jobs directly from written prompts. Use this for brief-to-assets workflows before assembling a sequence. Defaults to previewOnly; applying can start local/credit-backed generation, so require explicit user approval first.',
+      description: 'Preview or queue text-to-image/text-to-video generation jobs directly from written prompts, plus image-input workflows such as image-edit when each job supplies its input via jobs[].assetFieldIds.image. Use this for brief-to-assets workflows before assembling a sequence. Defaults to previewOnly; applying can start local/credit-backed generation, so require explicit user approval first.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -7064,7 +7239,7 @@ function createToolDefinitions() {
                 },
                 assetFieldIds: {
                   type: 'object',
-                  description: 'Map workflow asset-select fields to Vidwright asset IDs, for example { "referenceImage1": "...", "referenceImage2": "..." } for Seedance 2.0 R2V.',
+                  description: 'Map workflow asset fields to Vidwright asset IDs, for example { "referenceImage1": "...", "referenceImage2": "..." } for Seedance 2.0 R2V, or { "image": "<image asset id>" } for input-image workflows such as image-edit.',
                   additionalProperties: { type: 'string' },
                 },
                 referenceImages: {
@@ -7396,13 +7571,14 @@ function createToolDefinitions() {
     },
     {
       name: 'transcribe_captions',
-      description: 'Transcribe spoken audio into timed caption cues with the local ComfyUI Qwen3-ASR workflow. Starts a background job and returns a jobId immediately; poll get_caption_status for progress and the finished editable cue draft. Timeline scope transcribes the mixed program audio; asset scope transcribes one source asset. Requires a reachable ComfyUI connection. Defaults to previewOnly.',
+      description: 'Transcribe spoken audio into timed caption cues with the local whisper caption engine (ComfyUI Qwen3-ASR only as a configured fallback). Starts a background job and returns a jobId immediately; poll get_caption_status for progress and the finished editable cue draft. Timeline scope transcribes the mixed program audio; asset scope transcribes one source asset. Defaults to previewOnly.',
       inputSchema: {
         type: 'object',
         properties: {
           scope: { type: 'string', enum: ['timeline', 'asset'], description: 'Transcribe the mixed timeline program audio or a single source asset. Defaults to timeline.' },
           assetId: { type: 'string', description: 'Source asset ID from get_assets. Required when scope is asset.' },
           language: { type: 'string', description: 'ASR language hint such as English or Auto. Defaults to Auto.' },
+          vocabulary: { type: 'string', description: 'Optional comma-separated vocabulary (brand names, people, jargon) to bias recognition. Omit to auto-derive from the project (name, timelines, text clips); pass an empty string to disable hints.' },
           previewOnly: { type: 'boolean', description: 'When true, returns the transcription plan without starting a job. Defaults to true.' },
         },
       },
@@ -7420,10 +7596,12 @@ function createToolDefinitions() {
     },
     {
       name: 'update_caption_cues',
-      description: 'Edit the caption cue draft produced by transcribe_captions before rendering: fix text, retime, remove cues, or replace the whole cue list. Draft-only; the timeline does not change until generate_captions runs.',
+      description: 'Edit caption cues: fix text, retime, remove cues, or replace the whole list. Targets the transcription draft (the transcribe -> update -> generate flow) OR a live captions clip already placed on the timeline — clip edits are visible immediately and preserve each cue\'s styling. Default target: the draft when one exists, else the live captions clip.',
       inputSchema: {
         type: 'object',
         properties: {
+          target: { type: 'string', enum: ['draft', 'clip'], description: 'Force the edit target: the transcription draft, or the placed live captions clip.' },
+          clipId: { type: 'string', description: 'A specific live captions clip id (implies target "clip"). Usually unnecessary — a timeline has one captions clip.' },
           cues: {
             type: 'array',
             description: 'Full replacement cue list. Times are in seconds.',
@@ -7452,14 +7630,14 @@ function createToolDefinitions() {
               required: ['id'],
             },
           },
-          removeIds: { type: 'array', items: { type: 'string' }, description: 'Cue IDs to delete from the draft.' },
-          previewOnly: { type: 'boolean', description: 'When true, returns the resulting cue list without saving the draft.' },
+          removeIds: { type: 'array', items: { type: 'string' }, description: 'Cue IDs to delete.' },
+          previewOnly: { type: 'boolean', description: 'When true, returns the resulting cue list without changing the draft or clip.' },
         },
       },
     },
     {
       name: 'generate_captions',
-      description: 'Render the caption cue draft into a transparent animated overlay and place it on the dedicated Captions track. Starts a background job that renders in real time (a 10s program takes about 10s); poll get_caption_status. Replaces any prior timeline-scope caption overlay. Defaults to previewOnly.',
+      description: 'Generate captions from the cue draft. Timeline scope places a LIVE captions clip instantly (cues render every frame in preview and export — no baked overlay; the clip keeps its transform/grade/masks through a regenerate, and update_caption_cues edits it in place). Asset scope still renders a baked overlay in real time; poll get_caption_status either way. Defaults to previewOnly.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -7493,11 +7671,381 @@ function createToolDefinitions() {
       },
     },
     {
+      name: 'get_music_video_session',
+      description: 'Read the complete agent-guided Music Video session from the Director workspace: song, lyrics/SRT, creative direction, cast, workflows, output settings, master and coverage passes, active plan, queue, and resumable conversation checkpoint. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          timeoutMs: { type: 'integer', description: 'Optional renderer response timeout in milliseconds. Defaults to 30000.' },
+        },
+      },
+    },
+    {
+      name: 'configure_music_video',
+      description: 'Preview or update Music Video setup using existing project assets. Configures the song, lyrics, creative direction, workflows, resolution, and FPS in the same Director state used by the UI. Use import_asset_from_path first for a new local song. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          audioAssetId: { type: 'string', description: 'Existing project audio asset ID. Use an empty string to clear it.' },
+          audioKind: { type: 'string', enum: ['mixed_track', 'vocal_stem', 'instrumental'] },
+          asrLanguage: { type: 'string' },
+          lyricsOrSrt: { type: 'string', description: 'Generated/finished lyrics timing field. Accepts plain lyrics, SRT, or LRC.' },
+          providedLyrics: { type: 'string', description: 'Optional source lyrics to align against audio.' },
+          alignProvidedLyrics: { type: 'boolean' },
+          concept: { type: 'string' },
+          styleNotes: { type: 'string' },
+          targetDurationSeconds: { type: 'number' },
+          keyframeWorkflowId: { type: 'string', enum: ['image-edit', 'nano-banana-2', 'custom-music-keyframe'] },
+          videoWorkflowId: { type: 'string', enum: ['music-video-shot-ltx23', 'wan22-i2v', 'custom-music-video'] },
+          aspectRatio: { type: 'string', enum: ['landscape_16x9', 'vertical_9x16', 'square_1x1'] },
+          resolutionPreset: { type: 'string', enum: ['720p', '1080p'] },
+          width: { type: 'integer', description: 'Explicit output width. Supply with height to override aspect/preset.' },
+          height: { type: 'integer', description: 'Explicit output height. Supply with width to override aspect/preset.' },
+          fps: { type: 'integer', enum: [24, 25, 30] },
+          activate: { type: 'boolean', description: 'Open/activate Music Video Creation. Defaults to true.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'update_music_video_session',
+      description: 'Preview or persist the conversational Music Video checkpoint so an agent can resume a multi-turn creation session without hiding state from the user. Store the current phase, goal, summary, next question, decisions, approvals, and notes. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['merge', 'replace'], description: 'Merge into the checkpoint by default, or replace it.' },
+          session: {
+            type: 'object',
+            properties: {
+              phase: { type: 'string', enum: ['intake', 'song', 'artist', 'creative_direction', 'director_plan', 'keyframes', 'videos', 'edit', 'review', 'complete'] },
+              title: { type: 'string' },
+              goal: { type: 'string' },
+              summary: { type: 'string' },
+              nextQuestion: { type: 'string' },
+              decisions: { type: 'array', items: { type: 'string' } },
+              approvals: { type: 'array', items: { type: 'string' } },
+              notes: { type: 'array', items: { type: 'string' } },
+            },
+          },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'manage_music_video_cast',
+      description: 'Preview or manage the Music Video cast roster in the Director workspace. Add, update, remove, replace, or clear named performers and their existing image references. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['add', 'update', 'remove', 'replace', 'clear'] },
+          castId: { type: 'string', description: 'Required for update/remove.' },
+          entry: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              label: { type: 'string' },
+              slug: { type: 'string' },
+              assetId: { type: 'string', description: 'Existing project image asset ID.' },
+              role: { type: 'string' },
+              notes: { type: 'string' },
+            },
+          },
+          entries: { type: 'array', items: { type: 'object' }, description: 'Full cast list for replace.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['action'],
+      },
+    },
+    {
+      name: 'queue_music_video_character_asset',
+      description: 'Preview or queue a local AI portrait or character sheet for the Music Video cast. Portrait uses Z-Image Turbo; character_sheet uses Multiple Angles and requires an existing input image. Applying starts local GPU work. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          stage: { type: 'string', enum: ['portrait', 'character_sheet'] },
+          name: { type: 'string' },
+          prompt: { type: 'string' },
+          negativePrompt: { type: 'string' },
+          inputAssetId: { type: 'string', description: 'Required image asset for character_sheet.' },
+          assetPrefix: { type: 'string' },
+          seed: { type: 'integer' },
+          width: { type: 'integer' },
+          height: { type: 'integer' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['stage'],
+      },
+    },
+    {
+      name: 'manage_music_video_pass',
+      description: 'Preview or manage second-unit Music Video coverage passes. Create, update, remove, or activate alternate performance, environmental b-roll, and detail b-roll passes. The master pass can be activated with passId master. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['create', 'update', 'remove', 'activate'] },
+          passId: { type: 'string' },
+          passType: { type: 'string', enum: ['alt_performance', 'environmental_broll', 'detail_broll'] },
+          label: { type: 'string' },
+          variantDescriptor: { type: 'string' },
+          script: { type: 'string' },
+          activate: { type: 'boolean', description: 'For create, activate the new pass. Defaults to true.' },
+          pass: { type: 'object', description: 'Optional update fields for action update.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['action'],
+      },
+    },
+    {
+      name: 'set_music_video_director_script',
+      description: 'Preview, validate, save, and optionally parse a complete Music Video director script into the editable Director plan. Targets master, active, or a coverage pass ID. Defaults to parsing and previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          target: { type: 'string', description: 'master, active, or an exact pass ID.' },
+          script: { type: 'string' },
+          parse: { type: 'boolean', description: 'Parse into scenes and shots. Defaults to true.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['script'],
+      },
+    },
+    {
+      name: 'update_music_video_shot',
+      description: 'Preview or update one shot in the active parsed Music Video plan. Supports prompt, timing, camera, shot type, artist, and per-shot reference overrides. Use get_music_video_plan for exact IDs. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string' },
+          shotId: { type: 'string' },
+          patch: {
+            type: 'object',
+            properties: {
+              keyframePrompt: { type: 'string' },
+              motionPrompt: { type: 'string' },
+              camera: { type: 'string' },
+              shotType: { type: 'string' },
+              audioStart: { type: 'number' },
+              durationSeconds: { type: 'number' },
+              artist: { type: 'string' },
+              referenceOverrideEnabled: { type: 'boolean' },
+              referenceAssetId1: { type: 'string' },
+              referenceAssetId2: { type: 'string' },
+            },
+          },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['sceneId', 'shotId', 'patch'],
+      },
+    },
+    {
+      name: 'queue_music_video_keyframes',
+      description: 'Preview or queue Music Video keyframes for missing, all, or selected shots using native Director routing. Reference-free b-roll still follows Vidwright local fallback rules. Applying may start local GPU work or spend cloud credits. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['missing', 'all', 'selected'] },
+          shots: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { sceneId: { type: 'string' }, shotId: { type: 'string' } },
+              required: ['sceneId', 'shotId'],
+            },
+          },
+          workflowId: { type: 'string', description: 'Optional keyframe workflow override.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'queue_music_video_videos',
+      description: 'Preview or queue Music Video videos for missing, all, or selected shots using generated keyframes and native Director routing. Applying may start local GPU work or spend cloud credits. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['missing', 'all', 'selected'] },
+          shots: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { sceneId: { type: 'string' }, shotId: { type: 'string' } },
+              required: ['sceneId', 'shotId'],
+            },
+          },
+          workflowIds: { type: 'array', items: { type: 'string' }, description: 'Optional video workflow overrides.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'replace_music_video_keyframe',
+      description: 'Preview or replace one Music Video Step 4 keyframe with an existing project image asset while preserving Director metadata. Use import_asset_from_path first for a new local file. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string' },
+          shotId: { type: 'string' },
+          assetId: { type: 'string' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['sceneId', 'shotId', 'assetId'],
+      },
+    },
+    {
+      name: 'replace_music_video_video',
+      description: 'Preview or replace one Music Video Step 5 result with an existing project video asset while preserving Director metadata. Use import_asset_from_path first for a new local file. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string' },
+          shotId: { type: 'string' },
+          assetId: { type: 'string' },
+          workflowId: { type: 'string' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['sceneId', 'shotId', 'assetId'],
+      },
+    },
+    {
+      name: 'transcribe_music_video_audio',
+      description: 'Preview or run the Music Video Qwen ASR transcription/alignment workflow for the selected song. Existing SRT is only replaced when replaceExisting is explicitly true. Applying starts local GPU work. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          language: { type: 'string' },
+          replaceExisting: { type: 'boolean' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer', description: 'May need a long timeout while ASR runs.' },
+        },
+      },
+    },
+    {
+      name: 'assemble_music_video_timeline',
+      description: 'Preview or assemble ready Music Video clips and song audio into a generated edit timeline with coverage tracks and vocal-performance sync locks. Existing assembled shots are kept. Pass a new timelineName to build a clean assembly without altering an older edit. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          saveAfterAssembly: { type: 'boolean', description: 'Save the project after assembly. Defaults to true.' },
+          timelineName: { type: 'string', description: 'Optional generated timeline name. Use a new name for a clean assembly instead of reusing an older edit.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'replace_music_video_timeline_shot',
+      description: 'Preview or replace an already assembled Music Video timeline shot with its latest or a specified generated video, preserving timing, transforms, effects, and sync lock. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string' },
+          shotId: { type: 'string' },
+          clipId: { type: 'string', description: 'Required only when multiple assembled clips match the same shot.' },
+          assetId: { type: 'string', description: 'Specific replacement video. Defaults to the latest result for the shot.' },
+          preserveDuration: { type: 'boolean', description: 'Defaults to true.' },
+          preserveTrim: { type: 'boolean', description: 'Preserve current source trims. Defaults to false.' },
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+          timeoutMs: { type: 'integer' },
+        },
+        required: ['sceneId', 'shotId'],
+      },
+    },
+    {
+      name: 'save_project',
+      description: 'Preview or explicitly save the current Vidwright project, including Director state, assets, and the active timeline. Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          previewOnly: { type: 'boolean', description: 'Defaults to true.' },
+        },
+      },
+    },
+    {
       name: 'get_music_video_status',
       description: 'Summarize Vidwright music-video workflow assets, assembled clips, and sync-locked clips in the current project.',
       inputSchema: {
         type: 'object',
         properties: {},
+      },
+    },
+    {
+      name: 'inspect_music_video_keyframe',
+      description: 'Inspect one Music Video Step 4 shot through the open Generate workspace. Returns its prompt, current keyframe, generation history, active job, selected workflow, expected workflow routing, and whether it can be regenerated. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string', description: 'Exact scene ID from the parsed Music Video director script, such as S1.' },
+          shotId: { type: 'string', description: 'Exact shot ID from the parsed Music Video director script, such as S1_SH1.' },
+          includeImage: { type: 'boolean', description: 'Include the latest generated keyframe image when it is small enough to embed. Defaults to true.' },
+          maxImageBytes: { type: 'integer', description: 'Maximum latest-image size to embed. Defaults to 3MB and is capped at 10MB.' },
+          timeoutMs: { type: 'integer', description: 'Optional renderer response timeout in milliseconds. Defaults to 30000.' },
+        },
+        required: ['sceneId', 'shotId'],
+      },
+    },
+    {
+      name: 'regenerate_music_video_keyframe',
+      description: 'Preview or queue regeneration of one Music Video Step 4 shot using the exact active keyframe settings and native Vidwright routing. This includes reference-free b-roll fallback routing. Defaults to previewOnly and may start local GPU work or spend cloud credits when applied.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string', description: 'Exact scene ID from the parsed Music Video director script, such as S1.' },
+          shotId: { type: 'string', description: 'Exact shot ID from the parsed Music Video director script, such as S1_SH1.' },
+          previewOnly: { type: 'boolean', description: 'When true, returns the exact routing and prompt without queueing generation. Defaults to true.' },
+          timeoutMs: { type: 'integer', description: 'Optional renderer response timeout in milliseconds. Defaults to 30000.' },
+        },
+        required: ['sceneId', 'shotId'],
+      },
+    },
+    {
+      name: 'get_music_video_plan',
+      description: 'Return the parsed Music Video director plan from the open Generate workspace, including every sceneId and shotId, timing, shot type, keyframe and motion prompts, selected workflows, active jobs, and Step 4/5 completion state. Includes shots that have not generated assets yet. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          timeoutMs: { type: 'integer', description: 'Optional renderer response timeout in milliseconds. Defaults to 30000.' },
+        },
+      },
+    },
+    {
+      name: 'inspect_music_video_video',
+      description: 'Inspect one Music Video Step 5 shot through the open Generate workspace. Returns its input keyframe, motion prompt, timing, active workflow settings, active job, latest video, output history, and latest poster image when available. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string', description: 'Exact scene ID from get_music_video_plan, such as S1.' },
+          shotId: { type: 'string', description: 'Exact shot ID from get_music_video_plan, such as S1_SH1.' },
+          includeImage: { type: 'boolean', description: 'Include the latest video poster image when available and small enough to embed. Defaults to true.' },
+          maxImageBytes: { type: 'integer', description: 'Maximum poster-image size to embed. Defaults to 3MB and is capped at 10MB.' },
+          timeoutMs: { type: 'integer', description: 'Optional renderer response timeout in milliseconds. Defaults to 30000.' },
+        },
+        required: ['sceneId', 'shotId'],
+      },
+    },
+    {
+      name: 'regenerate_music_video_video',
+      description: 'Preview or queue regeneration of one Music Video Step 5 shot using its generated keyframe and the exact active video settings and native Vidwright routing. Defaults to previewOnly and may start local GPU work or spend cloud credits when applied.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sceneId: { type: 'string', description: 'Exact scene ID from get_music_video_plan, such as S1.' },
+          shotId: { type: 'string', description: 'Exact shot ID from get_music_video_plan, such as S1_SH1.' },
+          previewOnly: { type: 'boolean', description: 'When true, returns the exact input, prompt, timing, and workflow without queueing generation. Defaults to true.' },
+          timeoutMs: { type: 'integer', description: 'Optional renderer response timeout in milliseconds. Defaults to 30000.' },
+        },
+        required: ['sceneId', 'shotId'],
       },
     },
     {
@@ -7849,14 +8397,16 @@ function createToolDefinitions() {
     },
     {
       name: 'import_asset_from_path',
-      description: 'Preview or import a local media file path into the active Vidwright project assets folder. Applies the same copy/import path as the UI import button and can place the new asset into an asset folder.',
+      description: 'Preview or import a local media path into the active Vidwright project. Single files use the same copy/import path as the UI import button. Image sequences import too: point at a folder of numbered frames (or any one frame of a 3+ frame run — png/jpg/webp/tif/exr/dpx) and the run transcodes once into a single video clip tagged with its sequence provenance; gaps hold the previous frame.',
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Absolute local file path to import.' },
+          path: { type: 'string', description: 'Absolute local file path to import — or a directory / any numbered frame of an image sequence.' },
           filePath: { type: 'string', description: 'Alias for path.' },
           sourcePath: { type: 'string', description: 'Alias for path.' },
-          category: { type: 'string', enum: ['video', 'audio', 'images', 'image'], description: 'Optional category. If omitted, inferred from extension.' },
+          asSequence: { type: 'boolean', description: 'true forces sequence import (errors if no run is found); false disables detection and imports the single file. Omit for auto-detect.' },
+          fps: { type: 'number', description: 'Sequence frame rate. Defaults to the project rate; recorded in the asset\'s sequenceSource tag for later re-interpretation.' },
+          category: { type: 'string', enum: ['video', 'audio', 'images', 'image'], description: 'Optional category for single-file imports. If omitted, inferred from extension.' },
           folderId: { type: 'string', description: 'Optional existing asset folder ID for the imported asset.' },
           folderPath: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }], description: 'Optional folder path to create/reuse before assigning the imported asset.' },
           folderName: { type: 'string', description: 'Single folder name alias for folderPath.' },
@@ -7882,7 +8432,7 @@ function createToolDefinitions() {
     },
     {
       name: 'set_clip_style',
-      description: 'Preview or batch-update simple clip styling: label color, enabled state, transform fields, crop, blur, blend mode, motion blur settings, track matte, motion path mode, and corner pin. Use for broad AI timeline polish passes. Defaults to previewOnly.',
+      description: 'Preview or batch-update simple clip styling: label color, enabled state, transform fields, crop, blur, blend mode, motion blur settings, track matte, motion path mode, corner pin, and bypass pills (per-group mask/color/effects A/B switches). Use for broad AI timeline polish passes. Defaults to previewOnly.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -7911,8 +8461,61 @@ function createToolDefinitions() {
           motionPathMode: { type: 'string', enum: ['linear', 'smooth'], description: 'Position keyframe interpolation: linear = straight lines, smooth = curved path through the keyframes (auto bezier).' },
           cornerPinEnabled: { type: 'boolean', description: 'Enable corner pin distortion (video/image clips, GPU compositing). Set the per-corner offsets via the transform object or keyframe them with set_clip_keyframes.' },
           trackMatte: { type: 'string', enum: ['none', 'alpha', 'alpha-inverted', 'luma', 'luma-inverted'], description: 'Track matte: the visual layer directly above the clip becomes the matte and is hidden from output. Alpha uses the matte layer\'s alpha, luma its brightness.' },
+          bypass: {
+            type: 'object',
+            description: 'Bypass pills: per-group A/B switches. true = the group is temporarily switched off (settings untouched, honored by preview AND export), false = active again. E.g. { "color": true } for a before/after grade check.',
+            properties: {
+              mask: { type: 'boolean' },
+              color: { type: 'boolean' },
+              effects: { type: 'boolean' },
+            },
+          },
           limit: { type: 'integer', description: 'Safety limit for matched clips. Defaults to 100.' },
           previewOnly: { type: 'boolean', description: 'When true, returns the style plan without changing clips. Defaults to true.' },
+        },
+      },
+    },
+    {
+      name: 'set_clip_mask',
+      description: 'Preview or set clip masks (video/image clips): parametric shapes (rectangle/ellipse/rounded), bezier spline masks, or an AI mask image — the same three modes as the Inspector Mask section. Whole-mask animation goes through set_clip_keyframes (shapeMask.* properties). Defaults to previewOnly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          clipId: { type: 'string', description: 'Single clip ID to update.' },
+          clipIds: { type: 'array', items: { type: 'string' }, description: 'Clip IDs to update.' },
+          filter: { type: 'string', enum: ['selected', 'disabled', 'enabled', 'visual', 'audio', 'labeled', 'colored'], description: 'Optional target filter when IDs are omitted.' },
+          trackId: { type: 'string', description: 'Only update clips on this track.' },
+          nameIncludes: { type: 'string', description: 'Only update clips whose name/asset/id contains this text.' },
+          shape: { type: 'string', enum: ['rectangle', 'ellipse', 'rounded', 'spline', 'image', 'none'], description: 'Mask mode. rectangle/ellipse/rounded/spline create or retype a shape mask; image assigns a mask asset (needs maskAssetId); none removes the shape mask. Omit to update geometry of an existing mask.' },
+          centerX: { type: 'number', description: 'Mask center X as % of frame width (default 50; -50..150).' },
+          centerY: { type: 'number', description: 'Mask center Y as % of frame height (default 50; -50..150).' },
+          width: { type: 'number', description: 'Mask width as % of frame width (1..200).' },
+          height: { type: 'number', description: 'Mask height as % of frame height (1..200).' },
+          rotation: { type: 'number', description: 'Mask rotation in degrees (-180..180).' },
+          cornerRadius: { type: 'number', description: 'Rounded-rect corner radius, % of the shorter half-extent (0..100).' },
+          feather: { type: 'number', description: 'Edge softness as % of frame height (0..50).' },
+          invert: { type: 'boolean', description: 'Invert the shape mask.' },
+          points: {
+            type: 'array',
+            description: 'Spline anchors in the mask unit box: x/y in -0.5..0.5 span the mask width/height (center/size/rotation move the whole path rigidly). hIn/hOut are optional bezier handle offsets FROM the anchor; omit them for straight polygon corners. At least 3 points.',
+            items: {
+              type: 'object',
+              properties: {
+                x: { type: 'number' },
+                y: { type: 'number' },
+                hIn: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+                hOut: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+              },
+              required: ['x', 'y'],
+            },
+          },
+          maskAssetId: { type: 'string', description: 'Mask asset id (type "mask" in get_assets) for shape "image". Replaces any existing image mask on the clip.' },
+          invertImageMask: { type: 'boolean', description: 'Invert the assigned image mask.' },
+          imageMaskFeather: { type: 'number', description: 'Feather for the assigned image mask, in pixels.' },
+          clearImageMask: { type: 'boolean', description: 'Remove any assigned image mask from the matched clips.' },
+          clear: { type: 'boolean', description: 'Remove the shape mask (same as shape "none"); combined with clearImageMask it clears everything.' },
+          limit: { type: 'integer', description: 'Safety limit for matched clips. Defaults to 25.' },
+          previewOnly: { type: 'boolean', description: 'When true, returns the mask plan without changing clips. Defaults to true.' },
         },
       },
     },
@@ -8366,7 +8969,7 @@ function createToolDefinitions() {
           trackId: { type: 'string', description: 'Track ID from get_timeline.' },
           name: { type: 'string', description: 'Optional new track name.' },
           muted: { type: 'boolean', description: 'Mute/unmute the track.' },
-          solo: { type: 'boolean', description: 'Solo/unsolo an audio track. While any audio track is soloed, only soloed unmuted audio tracks are audible in preview and export.' },
+          solo: { type: 'boolean', description: 'Solo/unsolo an audio or video track. Audio solo limits audible tracks; video solo limits visible picture tracks in preview, export, and inspection.' },
           volume: { type: 'number', description: 'Mixer fader level for audio tracks, 0-200 (100 = unity/0 dB, 200 = +6 dB). Applies to preview and export.' },
           pan: { type: 'number', description: 'Stereo pan for audio tracks, -100 (full left) to 100 (full right), 0 = center. Applies to preview and export.' },
           inserts: {
@@ -8684,6 +9287,14 @@ function createToolDefinitions() {
           duration: {
             type: 'number',
             description: 'Alias for durationSeconds.',
+          },
+          sourceInSeconds: {
+            type: 'number',
+            description: 'Source-media in point in seconds (video/audio). The clip is born pre-trimmed from here — timeline trim handles can still reveal the rest of the source later.',
+          },
+          sourceOutSeconds: {
+            type: 'number',
+            description: 'Source-media out point in seconds. With sourceInSeconds it defines the inserted range; when durationSeconds is omitted, the clip duration derives from the range.',
           },
           resolveOverlaps: {
             type: 'boolean',
@@ -9746,21 +10357,26 @@ function createToolDefinitions() {
     },
     {
       name: 'export_fcpxml',
-      description: 'Preview or export the active Vidwright timeline as Final Cut Pro XML for Resolve, Final Cut, or Premiere interchange. Writes to the project renders folder unless outputPath is provided.',
+      description: 'Preview or export the active Vidwright timeline as modern FCPXML for Resolve/Final Cut or legacy XMEML v5 for Adobe Premiere Pro. Writes to the project renders folder unless outputPath is provided.',
       inputSchema: {
         type: 'object',
         properties: {
+          format: {
+            type: 'string',
+            enum: ['fcpxml', 'premiere'],
+            description: 'Use fcpxml for Resolve/Final Cut or premiere for Adobe Premiere Pro. Defaults to fcpxml.',
+          },
           filename: {
             type: 'string',
             description: 'Optional output filename without extension. Defaults to project_timeline_timestamp.',
           },
           outputPath: {
             type: 'string',
-            description: 'Optional absolute .fcpxml output path. If omitted, writes to the project renders folder.',
+            description: 'Optional absolute .fcpxml or .xml output path. If omitted, writes to the project renders folder.',
           },
           previewOnly: {
             type: 'boolean',
-            description: 'When true, returns the FCPXML export plan without writing a file. Defaults to true.',
+            description: 'When true, returns the XML export plan without writing a file. Defaults to true.',
           },
         },
       },
@@ -9986,7 +10602,7 @@ class VidwrightMcpServer {
               name: 'vidwright',
               version: this.version,
             },
-            instructions: 'You are connected to Vidwright. Use guide_comfyui_setup first for beginner local ComfyUI setup questions like "How do I connect Vidwright to ComfyUI?"; it diagnoses, probes likely ports, gives Portable/Desktop/Docker/manual steps, and previews safe port fixes. Use diagnose_comfyui_connection, repair_comfyui_connection, set_comfyui_connection, control_comfyui_launcher, get_comfyui_launcher_logs, validate_comfyui_nodes, list_vidwright_workflows, and inspect_vidwright_workflow for deeper local ComfyUI setup/support questions. Use get_mcp_recipes or get_ai_review_passes to choose safe review workflows. Use find_timeline_items before targeting timeline clips, tracks, markers, transitions, or project assets from a natural-language request. Use check_media_health before delivery/relinking work, relink_asset with previewOnly before changing asset paths, and inspect_export_file after rendering when the user asks whether a file exists or has the expected codec, duration, FPS, or dimensions. Use run_mcp_action_plan with previewOnly before applying an approved multi-step edit in one checkpointed pass. Use the tools to inspect the open project, timeline, assets, generation status, music-video workflow state, the composed timeline frame at the playhead, sampled visual timeline ranges, and top-visible shot pages for fast-cut edit review. Use create_project with previewOnly first when the user wants a fresh Vidwright project, and use duplicate_project with previewOnly first before risky AI experiments on an existing project. Use create_timeline with previewOnly first when the user wants a new sequence/timeline for an alternate edit, review selects, generated variations, or a fresh AI-built layout; use switch_timeline, rename_timeline, duplicate_timeline, and delete_timeline with previewOnly first for sequence management. Use update_track and remove_track with previewOnly first for track cleanup, locking/muting/showing tracks, renaming, and layer order. Use add_transition, update_transition, and remove_transitions with previewOnly first for native dissolves, fades, wipes, slides, zooms, blur transitions, and dip-to-black style edits. Use move_clips, trim_clips, and delete_clips with previewOnly first for timeline edit operations such as cleanup passes, staggered layouts, trims, and ripple deletes. Use create_asset_folder with previewOnly first when a generation batch or AI-built layout should keep its source assets organized in a named/nested project folder. Use move_assets_to_folder with previewOnly first when assets should be cleaned up or moved into a folder, for example rootOnly + constantsOnly into a Constants folder. Use queue_prompt_generation_batch with previewOnly first when the user wants new images or videos generated from a written brief; show prompts, workflows, counts, seeds, resolution, duration, FPS, and output folder, then apply only after approval. Use prepare_generation_from_timeline_context with previewOnly first when the user wants to turn a timeline frame into a Generate-tab image-to-video or keyframe request; applying it only captures the frame and prefills Generate. Use queue_prepared_generation with previewOnly first and explicit user approval before queueing a staged Generate request. Use queue_timeline_generation_batch with previewOnly first when the user asks for multiple variations or multiple workflows from the same timeline frame; show workflow counts and seeds, then apply only after approval. Use list_comfyui_templates and queue_timeline_template_generation with previewOnly first when the user asks to run an official ComfyUI template such as LTX 2.3 LoRA video outpainting on a selected timeline clip; applying may import the template and queue local GPU work. Use import_comfyui_workflow with previewOnly first when the user brings a community ComfyUI workflow (comfy.org share URL, local .json, or pasted JSON); then install_workflow_setup with previewOnly and explicit approval for missing node packs/models (poll get_workflow_install_status, restart ComfyUI via control_comfyui_launcher when recommended), and run it with queue_timeline_template_generation using importedWorkflowId. Use add_asset_to_timeline with previewOnly first when the user wants one generated/imported asset placed back into the edit, or add_assets_to_timeline with previewOnly first when placing multiple results as review lanes or a sequential strip. Use add_solid_color with previewOnly first when the user needs black/color constants or background plates; it can create a bottom video track so solids sit behind the edit. Use add_adjustment_clip with previewOnly first when the user wants a color look, blur, GLSL effect, camera shake, vignette, grain, or keyframed treatment applied to multiple clips below a single adjustment layer. Use add_text_clip, add_shape_clip, update_text_clip, and update_shape_clip with previewOnly first for titles, lower thirds, lines, boxes, circles, frames, graphic accents, and simple motion graphics; use motionBlurEnabled/motionBlurSamples/motionBlurShutter on fast animated layers when requested. Use list_glsl_effects, add_glsl_effect, update_glsl_effect, and remove_glsl_effect with previewOnly first for GPU effects such as camera shake, directional blur, lens blur, fisheye, chroma warp, digital glitch, film grain, film look, flicker, VHS, and vignette; effect parameters can also be keyframed, including when the target clip is an adjustment clip. Use set_clip_keyframes with previewOnly first for visual clip fades, dips to black, moves, blur, crop reveals, and color/transform/shape style automation. Use export_fcpxml with previewOnly first when the user wants an interchange XML for Resolve, Final Cut, or Premiere. Queue tools use the same path as the Vidwright Queue button and may spend credits or start local GPU work depending on the selected workflow. The write actions currently exposed are ComfyUI setup guidance/settings, ComfyUI launcher start/stop/restart, project creation/duplication, asset folder creation, asset folder cleanup/move/relink operations, sequence/timeline creation and management, track management, native transitions, clip move/trim/delete operations, clip label coloring, clip enable/disable, timeline marker creation/removal/property updates, text/title/shape/adjustment clip creation and updates, GLSL effect add/update/remove operations, visual clip keyframes, solid color asset/clip creation, media asset placement, prompt-based generation queueing, preparing/queueing Generate from a timeline frame, official ComfyUI template generation from timeline media, checkpointed multi-step action plans, starting timeline delivery exports through Vidwright export worker, export-file QC, and FCPXML interchange export. Project creation/duplication writes project folders on disk; timeline/sequence, clip/marker/text/shape/adjustment/effect/media/keyframe actions are undoable in Vidwright; exports write new files to disk.',
+            instructions: 'You are connected to Vidwright. Use guide_comfyui_setup first for beginner local ComfyUI setup questions like "How do I connect Vidwright to ComfyUI?"; it diagnoses, probes likely ports, gives Portable/Desktop/Docker/manual steps, and previews safe port fixes. Use diagnose_comfyui_connection, repair_comfyui_connection, set_comfyui_connection, control_comfyui_launcher, get_comfyui_launcher_logs, validate_comfyui_nodes, list_vidwright_workflows, and inspect_vidwright_workflow for deeper local ComfyUI setup/support questions. Use get_mcp_recipes or get_ai_review_passes to choose safe review workflows. For agent-guided Music Video creation, begin with get_music_video_session, preserve the multi-turn checkpoint with update_music_video_session, and use the dedicated configure/cast/pass/script/shot/generation/assembly tools so the result stays editable in the visible Director and timeline UI; preview any generation or assembly action and get explicit approval before applying it. Use find_timeline_items before targeting timeline clips, tracks, markers, transitions, or project assets from a natural-language request. Use check_media_health before delivery/relinking work, relink_asset with previewOnly before changing asset paths, and inspect_export_file after rendering when the user asks whether a file exists or has the expected codec, duration, FPS, or dimensions. Use run_mcp_action_plan with previewOnly before applying an approved multi-step edit in one checkpointed pass. Use the tools to inspect the open project, timeline, assets, generation status, music-video workflow state, the composed timeline frame at the playhead, sampled visual timeline ranges, and top-visible shot pages for fast-cut edit review. Use create_project with previewOnly first when the user wants a fresh Vidwright project, and use duplicate_project with previewOnly first before risky AI experiments on an existing project. Use create_timeline with previewOnly first when the user wants a new sequence/timeline for an alternate edit, review selects, generated variations, or a fresh AI-built layout; use switch_timeline, rename_timeline, duplicate_timeline, and delete_timeline with previewOnly first for sequence management. Use update_track and remove_track with previewOnly first for track cleanup, locking/muting/showing tracks, renaming, and layer order. Use add_transition, update_transition, and remove_transitions with previewOnly first for native dissolves, fades, wipes, slides, zooms, blur transitions, and dip-to-black style edits. Use move_clips, trim_clips, and delete_clips with previewOnly first for timeline edit operations such as cleanup passes, staggered layouts, trims, and ripple deletes. Use create_asset_folder with previewOnly first when a generation batch or AI-built layout should keep its source assets organized in a named/nested project folder. Use move_assets_to_folder with previewOnly first when assets should be cleaned up or moved into a folder, for example rootOnly + constantsOnly into a Constants folder. Use queue_prompt_generation_batch with previewOnly first when the user wants new images or videos generated from a written brief; show prompts, workflows, counts, seeds, resolution, duration, FPS, and output folder, then apply only after approval. Use prepare_generation_from_timeline_context with previewOnly first when the user wants to turn a timeline frame into a Generate-tab image-to-video or keyframe request; applying it only captures the frame and prefills Generate. Use queue_prepared_generation with previewOnly first and explicit user approval before queueing a staged Generate request. Use queue_timeline_generation_batch with previewOnly first when the user asks for multiple variations or multiple workflows from the same timeline frame; show workflow counts and seeds, then apply only after approval. Use list_comfyui_templates and queue_timeline_template_generation with previewOnly first when the user asks to run an official ComfyUI template such as LTX 2.3 LoRA video outpainting on a selected timeline clip; applying may import the template and queue local GPU work. Use import_comfyui_workflow with previewOnly first when the user brings a community ComfyUI workflow (comfy.org share URL, local .json, or pasted JSON); then install_workflow_setup with previewOnly and explicit approval for missing node packs/models (poll get_workflow_install_status, restart ComfyUI via control_comfyui_launcher when recommended), and run it with queue_timeline_template_generation using importedWorkflowId. Use add_asset_to_timeline with previewOnly first when the user wants one generated/imported asset placed back into the edit, or add_assets_to_timeline with previewOnly first when placing multiple results as review lanes or a sequential strip. Use add_solid_color with previewOnly first when the user needs black/color constants or background plates; it can create a bottom video track so solids sit behind the edit. Use add_adjustment_clip with previewOnly first when the user wants a color look, blur, GLSL effect, camera shake, vignette, grain, or keyframed treatment applied to multiple clips below a single adjustment layer. Use add_text_clip, add_shape_clip, update_text_clip, and update_shape_clip with previewOnly first for titles, lower thirds, lines, boxes, circles, frames, graphic accents, and simple motion graphics; use motionBlurEnabled/motionBlurSamples/motionBlurShutter on fast animated layers when requested. Use list_glsl_effects, add_glsl_effect, update_glsl_effect, and remove_glsl_effect with previewOnly first for GPU effects such as camera shake, directional blur, lens blur, fisheye, chroma warp, digital glitch, film grain, film look, flicker, VHS, and vignette; effect parameters can also be keyframed, including when the target clip is an adjustment clip. Use set_clip_keyframes with previewOnly first for visual clip fades, dips to black, moves, blur, crop reveals, and color/transform/shape style automation. Use export_fcpxml with previewOnly first when the user wants an interchange XML for Resolve, Final Cut, or Premiere. Queue tools use the same path as the Vidwright Queue button and may spend credits or start local GPU work depending on the selected workflow. The write actions currently exposed are ComfyUI setup guidance/settings, ComfyUI launcher start/stop/restart, project creation/duplication/save, agent-guided Music Video setup/cast/pass/script/shot/generation/assembly, asset folder creation, asset folder cleanup/move/relink operations, sequence/timeline creation and management, track management, native transitions, clip move/trim/delete operations, clip label coloring, clip enable/disable, timeline marker creation/removal/property updates, text/title/shape/adjustment clip creation and updates, GLSL effect add/update/remove operations, visual clip keyframes, solid color asset/clip creation, media asset placement, prompt-based generation queueing, preparing/queueing Generate from a timeline frame, official ComfyUI template generation from timeline media, checkpointed multi-step action plans, starting timeline delivery exports through Vidwright export worker, export-file QC, and FCPXML interchange export. Project creation/duplication writes project folders on disk; timeline/sequence, clip/marker/text/shape/adjustment/effect/media/keyframe actions are undoable in Vidwright; exports write new files to disk.',
           }
           break
         case 'ping':
@@ -10157,6 +10773,10 @@ class VidwrightMcpServer {
         return this.runRendererActionTool('install_workflow_setup', args, { bridgeName: 'MCP workflow install bridge', suggestedTool: 'install_workflow_setup', defaultPreviewOnly: true })
       case 'get_workflow_install_status':
         return this.runRendererActionTool('get_workflow_install_status', args, { bridgeName: 'MCP workflow install bridge', suggestedTool: 'get_workflow_install_status' })
+      case 'queue_h3_reference_video':
+        return this.queueH3ReferenceVideo(snapshot, args)
+      case 'get_generation_queue_status':
+        return this.runRendererActionTool('get_generation_queue_status', args, { bridgeName: 'MCP generation queue status bridge', suggestedTool: 'get_generation_queue_status' })
       case 'queue_prompt_generation_batch':
         return this.queuePromptGenerationBatch(snapshot, args)
       case 'generate_music':
@@ -10191,8 +10811,40 @@ class VidwrightMcpServer {
         return this.runRendererActionTool('update_caption_cues', args, { bridgeName: 'MCP captions bridge', suggestedTool: 'update_caption_cues' })
       case 'generate_captions':
         return this.runRendererActionTool('generate_captions', args, { bridgeName: 'MCP captions bridge', suggestedTool: 'generate_captions', defaultPreviewOnly: true })
+      case 'get_music_video_session':
+        return this.runRendererActionTool('get_music_video_session', args, { bridgeName: 'MCP Music Video session bridge', suggestedTool: 'get_music_video_session' })
+      case 'configure_music_video':
+      case 'update_music_video_session':
+      case 'manage_music_video_cast':
+      case 'queue_music_video_character_asset':
+      case 'manage_music_video_pass':
+      case 'set_music_video_director_script':
+      case 'update_music_video_shot':
+      case 'queue_music_video_keyframes':
+      case 'queue_music_video_videos':
+      case 'replace_music_video_keyframe':
+      case 'replace_music_video_video':
+      case 'transcribe_music_video_audio':
+      case 'assemble_music_video_timeline':
+      case 'replace_music_video_timeline_shot':
+      case 'save_project':
+        return this.runRendererActionTool(name, args, {
+          bridgeName: 'MCP Music Video creation bridge',
+          suggestedTool: name,
+          defaultPreviewOnly: true,
+        })
       case 'get_music_video_status':
         return textResult(summarizeMusicVideoWorkflow(snapshot))
+      case 'inspect_music_video_keyframe':
+        return this.inspectMusicVideoKeyframeTool(args)
+      case 'regenerate_music_video_keyframe':
+        return this.runRendererActionTool('regenerate_music_video_keyframe', args, { bridgeName: 'MCP Music Video keyframe bridge', suggestedTool: 'regenerate_music_video_keyframe', defaultPreviewOnly: true })
+      case 'get_music_video_plan':
+        return this.runRendererActionTool('get_music_video_plan', args, { bridgeName: 'MCP Music Video plan bridge', suggestedTool: 'get_music_video_plan' })
+      case 'inspect_music_video_video':
+        return this.inspectMusicVideoVideoTool(snapshot, args)
+      case 'regenerate_music_video_video':
+        return this.runRendererActionTool('regenerate_music_video_video', args, { bridgeName: 'MCP Music Video Step 5 bridge', suggestedTool: 'regenerate_music_video_video', defaultPreviewOnly: true })
       case 'analyze_timeline':
         return textResult(analyzeTimeline(snapshot, args))
       case 'analyze_music_video_workflow':
@@ -10227,6 +10879,8 @@ class VidwrightMcpServer {
         return this.runRendererActionTool('relink_asset', args, { bridgeName: 'MCP asset relink bridge', suggestedTool: 'relink_asset', defaultPreviewOnly: true })
       case 'set_clip_style':
         return this.runRendererActionTool('set_clip_style', args, { bridgeName: 'MCP clip style bridge', suggestedTool: 'set_clip_style', defaultPreviewOnly: true })
+      case 'set_clip_mask':
+        return this.runRendererActionTool('set_clip_mask', args, { bridgeName: 'MCP clip mask bridge', suggestedTool: 'set_clip_mask', defaultPreviewOnly: true })
       case 'run_mcp_action_plan':
         return this.runMcpActionPlan(snapshot, args)
       case 'set_in_out_range':
@@ -10807,6 +11461,93 @@ class VidwrightMcpServer {
     }
   }
 
+  async inspectMusicVideoKeyframeTool(args = {}) {
+    if (!this.performAction) {
+      return errorResult('MCP Music Video keyframe inspection is not available. Restart Vidwright and try again.')
+    }
+    try {
+      const result = await this.performAction({
+        action: 'inspect_music_video_keyframe',
+        payload: args || {},
+      })
+      const latestAsset = result?.report?.variants?.[0]?.latestAsset || null
+      const includeImage = args.includeImage !== false
+      const maxImageBytes = clampLimit(args.maxImageBytes, 3 * 1024 * 1024, 10 * 1024 * 1024)
+      let imageContent = null
+      let imageWarning = ''
+      let imageSize = null
+      if (includeImage && latestAsset?.absolutePath) {
+        const imageResult = await readImageContent(latestAsset.absolutePath, maxImageBytes)
+        imageContent = imageResult.imageContent
+        imageWarning = imageResult.warning || ''
+        imageSize = imageResult.size || null
+      } else if (includeImage) {
+        imageWarning = 'No generated keyframe image is available for this shot yet.'
+      }
+      return mixedResult({
+        success: result?.success !== false,
+        action: 'inspect_music_video_keyframe',
+        message: result?.message || 'Inspected the Music Video Step 4 keyframe.',
+        result,
+        previewImage: {
+          assetId: latestAsset?.id || null,
+          path: latestAsset?.absolutePath || '',
+          imageIncluded: Boolean(imageContent),
+          imageSize,
+          warning: imageWarning,
+        },
+      }, imageContent ? [imageContent] : [])
+    } catch (error) {
+      return errorResult(`inspect_music_video_keyframe failed: ${error?.message || String(error)}`)
+    }
+  }
+
+  async inspectMusicVideoVideoTool(snapshot, args = {}) {
+    if (!this.performAction) {
+      return errorResult('MCP Music Video Step 5 inspection is not available. Restart Vidwright and try again.')
+    }
+    try {
+      const result = await this.performAction({
+        action: 'inspect_music_video_video',
+        payload: args || {},
+      })
+      const latestAsset = result?.report?.variants?.[0]?.latestAsset || null
+      const includeImage = args.includeImage !== false
+      const maxImageBytes = clampLimit(args.maxImageBytes, 3 * 1024 * 1024, 10 * 1024 * 1024)
+      const posterPath = latestAsset?.posterPath
+        ? resolveProjectFilePath(snapshot, latestAsset.posterPath)
+        : ''
+      let imageContent = null
+      let imageWarning = ''
+      let imageSize = null
+      if (includeImage && posterPath) {
+        const imageResult = await readImageContent(posterPath, maxImageBytes)
+        imageContent = imageResult.imageContent
+        imageWarning = imageResult.warning || ''
+        imageSize = imageResult.size || null
+      } else if (includeImage && latestAsset) {
+        imageWarning = 'The latest video does not have a generated poster image yet.'
+      } else if (includeImage) {
+        imageWarning = 'No generated Step 5 video is available for this shot yet.'
+      }
+      return mixedResult({
+        success: result?.success !== false,
+        action: 'inspect_music_video_video',
+        message: result?.message || 'Inspected the Music Video Step 5 video.',
+        result,
+        previewImage: {
+          assetId: latestAsset?.id || null,
+          path: posterPath,
+          imageIncluded: Boolean(imageContent),
+          imageSize,
+          warning: imageWarning,
+        },
+      }, imageContent ? [imageContent] : [])
+    } catch (error) {
+      return errorResult(`inspect_music_video_video failed: ${error?.message || String(error)}`)
+    }
+  }
+
   async importComfyUiWorkflowTool(args = {}) {
     if (!this.performAction) {
       return errorResult('MCP workflow import bridge is not available. Restart Vidwright and try again.')
@@ -11241,6 +11982,65 @@ class VidwrightMcpServer {
       message: `Queued "${plan.template?.title || plan.template?.name || 'ComfyUI template'}" from the timeline source clip through Vidwright.`,
       plan,
       result,
+    })
+  }
+
+  async queueH3ReferenceVideo(snapshot, args = {}) {
+    const imageAssetId = String(args.imageAssetId || '').trim()
+    const audioAssetId = String(args.audioAssetId || '').trim()
+    const prompt = String(args.prompt || '').trim().slice(0, 5000)
+    if (!imageAssetId) return errorResult('imageAssetId is required.')
+    if (!audioAssetId) return errorResult('audioAssetId is required.')
+    if (!prompt) return errorResult('prompt is required.')
+
+    const assetById = new Map((snapshot.assets || []).map((asset) => [String(asset?.id || ''), asset]))
+    const imageAsset = assetById.get(imageAssetId)
+    const audioAsset = assetById.get(audioAssetId)
+    if (!imageAsset) return errorResult(`Unknown Vidwright image asset ID: ${imageAssetId}`)
+    if (!audioAsset) return errorResult(`Unknown Vidwright audio asset ID: ${audioAssetId}`)
+    if (String(imageAsset.type || '').toLowerCase() !== 'image') {
+      return errorResult(`imageAssetId must reference an image; ${imageAssetId} is ${imageAsset.type || 'unknown'}.`)
+    }
+    if (String(audioAsset.type || '').toLowerCase() !== 'audio') {
+      return errorResult(`audioAssetId must reference audio; ${audioAssetId} is ${audioAsset.type || 'unknown'}.`)
+    }
+
+    const requestedTier = String(args.resolutionTier || '2K').trim().toLowerCase()
+    const tier = requestedTier === '768p' || requestedTier === '1080p' ? '768P' : '2K'
+    const aspectRatio = ['16:9', '9:16', '1:1'].includes(String(args.aspectRatio || '').trim())
+      ? String(args.aspectRatio).trim()
+      : '16:9'
+    const dimensionsByTier = tier === '2K'
+      ? { '16:9': { width: 2560, height: 1440 }, '9:16': { width: 1440, height: 2560 }, '1:1': { width: 2048, height: 2048 } }
+      : { '16:9': { width: 1366, height: 768 }, '9:16': { width: 768, height: 1366 }, '1:1': { width: 768, height: 768 } }
+    const requestedDuration = Number(args.durationSeconds ?? args.duration)
+    const assetDuration = Number(audioAsset.duration || audioAsset.metadata?.duration || audioAsset.settings?.duration)
+    const durationSeconds = Math.max(5, Math.min(15, Math.round(
+      Number.isFinite(requestedDuration) && requestedDuration > 0
+        ? requestedDuration
+        : (Number.isFinite(assetDuration) && assetDuration > 0 ? assetDuration : 5)
+    )))
+    const shotId = String(args.shotId || '').trim().slice(0, 120)
+
+    return this.queuePromptGenerationBatch(snapshot, {
+      previewOnly: args.previewOnly !== false,
+      timeoutMs: args.timeoutMs,
+      folderId: args.folderId,
+      jobs: [{
+        workflowId: 'minimax-h3-r2v',
+        workflowLabel: 'MiniMax H3 Reference + Audio to Video',
+        prompt,
+        promptLabel: shotId || `H3 ${imageAsset.name || imageAssetId}`,
+        seed: args.seed,
+        durationSeconds,
+        fps: 24,
+        resolution: dimensionsByTier[aspectRatio],
+        assetFieldIds: {
+          referenceImage1: imageAssetId,
+          referenceAudio1: audioAssetId,
+        },
+        folderId: args.folderId,
+      }],
     })
   }
 
@@ -12080,6 +12880,9 @@ class VidwrightMcpServer {
     const updates = {}
     if (Object.prototype.hasOwnProperty.call(args, 'name')) updates.name = String(args.name || '').trim().slice(0, 80)
     if (Object.prototype.hasOwnProperty.call(args, 'muted')) updates.muted = args.muted === true
+    if ((track.type === 'audio' || track.type === 'video') && Object.prototype.hasOwnProperty.call(args, 'solo')) {
+      updates.solo = args.solo === true
+    }
     if (Object.prototype.hasOwnProperty.call(args, 'locked')) updates.locked = args.locked === true
     if (Object.prototype.hasOwnProperty.call(args, 'visible')) updates.visible = args.visible !== false
     if (track.type === 'audio' && Object.prototype.hasOwnProperty.call(args, 'channels')) {
@@ -12088,7 +12891,7 @@ class VidwrightMcpServer {
     const requestedIndex = Number(args.index ?? args.newIndex)
     const hasIndex = Number.isFinite(requestedIndex)
     if (Object.keys(updates).length === 0 && !hasIndex) {
-      return errorResult('Provide at least one update: name, muted, locked, visible, channels, or index.')
+      return errorResult('Provide at least one update: name, muted, solo, locked, visible, channels, or index.')
     }
 
     const plan = {
@@ -13700,10 +14503,23 @@ class VidwrightMcpServer {
   }
 
   async exportFcpXml(snapshot, args = {}) {
+    const requestedFormat = String(args.format || 'fcpxml').trim().toLowerCase()
+    const normalizedFormat = ['premiere', 'premiere-xml', 'fcp7', 'xmeml'].includes(requestedFormat)
+      ? 'premiere'
+      : requestedFormat === 'fcpxml'
+        ? 'fcpxml'
+        : ''
+    if (!normalizedFormat) {
+      return errorResult('Unsupported XML format. Use fcpxml for Resolve/Final Cut or premiere for Adobe Premiere Pro.')
+    }
+    const isPremiereXml = normalizedFormat === 'premiere'
+    const formatLabel = isPremiereXml ? 'Premiere XML' : 'FCPXML'
+    const xmlDialect = isPremiereXml ? 'xmeml-v5' : 'fcpxml-1.10'
+    const extension = isPremiereXml ? 'xml' : 'fcpxml'
     const timeline = snapshot.currentTimeline || null
     if (!timeline) return errorResult('No current timeline is available.')
     const projectPath = String(snapshot.project?.path || '').trim()
-    if (!projectPath) return errorResult('Open a saved project before exporting FCPXML.')
+    if (!projectPath) return errorResult(`Open a saved project before exporting ${formatLabel}.`)
 
     const assetsById = new Map((snapshot.assets || []).map((asset) => [asset.id, asset]))
     const exportableClips = (timeline.clips || []).filter((clip) => {
@@ -13713,7 +14529,7 @@ class VidwrightMcpServer {
       return Boolean(asset?.absolutePath || asset?.path)
     })
     if (exportableClips.length === 0) {
-      return errorResult('No media clips with project file paths are available for FCPXML export.')
+      return errorResult(`No media clips with project file paths are available for ${formatLabel} export.`)
     }
 
     const filename = String(args.filename || `${snapshot.project?.name || 'Vidwright'}_${timeline.name || 'Timeline'}`).trim()
@@ -13722,6 +14538,9 @@ class VidwrightMcpServer {
       projectPath,
       outputPath: outputPath || 'project renders folder',
       filename: filename || `${snapshot.project?.name || 'Vidwright'}_${timeline.name || 'Timeline'}`,
+      format: normalizedFormat,
+      xmlDialect,
+      extension,
       timeline: {
         id: timeline.id,
         name: timeline.name,
@@ -13732,18 +14551,21 @@ class VidwrightMcpServer {
       },
       exportableClipCount: exportableClips.length,
       skippedClipCount: (timeline.clips || []).length - exportableClips.length,
-      note: 'FCPXML exports media clips with project file paths plus static transform data where supported.',
+      note: isPremiereXml
+        ? 'Premiere XML Beta exports media clips, track placement, cuts, and source trims. Advanced effects, transitions, and keyframes may require rebuilding in Premiere.'
+        : 'FCPXML exports media clips with project file paths plus static transform data where supported.',
     }
 
     if (args.previewOnly !== false) {
       return textResult({
         previewOnly: true,
         action: 'export_fcpxml',
-        message: 'FCPXML export plan only. No file was written.',
+        message: `${formatLabel} export plan only. No file was written.`,
         plan,
         suggestedApplyCall: {
           tool: 'export_fcpxml',
           arguments: {
+            format: normalizedFormat,
             filename,
             ...(outputPath ? { outputPath } : {}),
             previewOnly: false,
@@ -13753,12 +14575,13 @@ class VidwrightMcpServer {
     }
 
     if (!this.performAction) {
-      return errorResult('MCP FCPXML export bridge is not available. Restart Vidwright and try again.')
+      return errorResult(`MCP ${formatLabel} export bridge is not available. Restart Vidwright and try again.`)
     }
 
     const result = await this.performAction({
       action: 'export_fcpxml',
       payload: {
+        format: normalizedFormat,
         filename,
         outputPath,
         previewOnly: false,
@@ -13768,7 +14591,7 @@ class VidwrightMcpServer {
     return textResult({
       success: true,
       action: 'export_fcpxml',
-      message: 'FCPXML exported through Vidwright.',
+      message: `${formatLabel} exported through Vidwright.`,
       plan,
       result,
     })

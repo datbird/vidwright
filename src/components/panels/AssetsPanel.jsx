@@ -15,6 +15,9 @@ import OverlayGeneratorModal from '../OverlayGeneratorModal'
 import TopazVideoUpscaleDialog from '../TopazVideoUpscaleDialog'
 import ConfirmDialog from '../ConfirmDialog'
 import NewTimelineDialog from '../NewTimelineDialog'
+import ImageSequenceImportDialog from './ImageSequenceImportDialog'
+import { buildSequenceImportPlan, importImageSequenceAsAsset, canImportImageSequences } from '../../services/imageSequenceImport'
+import { canRevealAssetInFileManager, getRevealInFileManagerLabel, revealAssetInFileManager } from '../../utils/revealInFileManager'
 // Thumbnail size presets (xs = extra small for denser grid)
 const THUMBNAIL_SIZES = {
   xs: { minWidth: 74, iconSize: 'w-3 h-3', playSize: 'w-3 h-3', badgeSize: 'text-[5px]', nameSize: 'text-[8px]', infoSize: 'text-[7px]' },
@@ -342,7 +345,14 @@ function AssetsPanel({ isActive = true }) {
     setAssetAudioEnabled,
   } = useAssetsStore()
   const { currentProject, currentProjectHandle, currentTimelineId, createTimeline, switchTimeline, saveProject, renameTimeline, setTimelineColor, moveTimelineToFolder, duplicateTimeline, deleteTimeline, getCurrentTimelineSettings } = useProjectStore()
-  const { isPlaying: timelineIsPlaying, togglePlay: timelineTogglePlay, removeAudioClipsForAsset, clearSelection: clearTimelineSelection } = useTimelineStore()
+  // Narrow selectors, not a bare useTimelineStore(): the bare subscription
+  // re-rendered this entire panel on every store write — including per-frame
+  // playhead writes during playback, which at hundreds of assets was a real
+  // per-frame cost (profiled at ~13% of playback CPU on a 288-asset project).
+  const timelineIsPlaying = useTimelineStore((s) => s.isPlaying)
+  const timelineTogglePlay = useTimelineStore((s) => s.togglePlay)
+  const removeAudioClipsForAsset = useTimelineStore((s) => s.removeAudioClipsForAsset)
+  const clearTimelineSelection = useTimelineStore((s) => s.clearSelection)
   
   // Load thumbnail size from localStorage
   useEffect(() => {
@@ -375,6 +385,10 @@ function AssetsPanel({ isActive = true }) {
   const SUPPORTED_AUDIO = ['.mp3', '.wav', '.ogg']
   const SUPPORTED_IMAGE = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
   const ALL_SUPPORTED = [...SUPPORTED_VIDEO, ...SUPPORTED_AUDIO, ...SUPPORTED_IMAGE]
+  // Sequence-only formats: ffmpeg decodes them into an intermediate, but the
+  // browser can't display them as stills — they never import individually.
+  const SEQUENCE_ONLY_IMAGE = ['.tif', '.tiff', '.exr', '.dpx']
+  const PICKER_ACCEPT = (canImportImageSequences() ? [...ALL_SUPPORTED, ...SEQUENCE_ONLY_IMAGE] : ALL_SUPPORTED).join(',')
   
   // Determine file category from extension
   const getFileCategory = (filename) => {
@@ -443,11 +457,91 @@ function AssetsPanel({ isActive = true }) {
     setIsImporting(false)
   }
   
+  // Image sequence import (VFX-style numbered frames, Electron only). A drop
+  // or pick that looks sequence-shaped opens the dialog instead of importing
+  // frame-by-frame; the transcode produces a normal video asset tagged with
+  // its sequence provenance.
+  const [sequenceImportPlan, setSequenceImportPlan] = useState(null)
+  const [sequenceImportBusy, setSequenceImportBusy] = useState(false)
+  const [sequenceImportProgress, setSequenceImportProgress] = useState({})
+  const [sequenceImportError, setSequenceImportError] = useState('')
+
+  const maybeOpenSequenceImport = async (files) => {
+    try {
+      const plan = await buildSequenceImportPlan(files)
+      if (plan?.sequences?.length) {
+        setSequenceImportError('')
+        setSequenceImportProgress({})
+        setSequenceImportPlan(plan)
+        return true
+      }
+    } catch (err) {
+      console.warn('Image sequence detection failed:', err)
+    }
+    return false
+  }
+
+  const runSequenceImport = async (decisions) => {
+    if (!currentProjectHandle || sequenceImportBusy) return
+    setSequenceImportBusy(true)
+    setSequenceImportError('')
+    const unsubscribe = window.electronAPI?.onImageSequenceProgress
+      ? window.electronAPI.onImageSequenceProgress((update) => {
+          if (update?.jobId) {
+            setSequenceImportProgress((prev) => ({ ...prev, [update.jobId]: update }))
+          }
+        })
+      : null
+    try {
+      const stillFiles = [...(sequenceImportPlan?.leftoverFiles || [])]
+      for (let i = 0; i < decisions.length; i++) {
+        const decision = decisions[i]
+        if (decision.mode === 'stills') {
+          stillFiles.push(...(decision.stillsFiles || []))
+          continue
+        }
+        const payload = await importImageSequenceAsAsset({
+          projectDir: currentProjectHandle,
+          sequence: decision.sequence,
+          fps: decision.fps,
+          jobId: `seq_${i}`,
+        })
+        const newAsset = addAsset({ ...payload, folderId: currentFolderId })
+        // Same post-import treatment as any video: playback cache, proxies,
+        // thumbnail sprites, poster.
+        if (newAsset?.absolutePath) {
+          enqueuePlaybackTranscode(currentProjectHandle, newAsset.id, newAsset.absolutePath).catch(() => {})
+          if (isProxyPlaybackEnabled()) {
+            enqueueProxyTranscode(currentProjectHandle, newAsset.id, newAsset.absolutePath).catch(() => {})
+          }
+        }
+        if (newAsset && (payload.duration || 0) > 0.5) {
+          const projectPath = typeof currentProjectHandle === 'string' ? currentProjectHandle : null
+          generateAssetSprite(newAsset.id, projectPath).catch(() => {})
+          generateAssetPoster(newAsset.id, projectPath).catch(() => {})
+        }
+      }
+      setSequenceImportPlan(null)
+      setSequenceImportProgress({})
+      if (stillFiles.length > 0) {
+        await handleImport(stillFiles)
+      }
+    } catch (err) {
+      setSequenceImportError(err?.message || 'Sequence import failed.')
+    } finally {
+      unsubscribe?.()
+      setSequenceImportBusy(false)
+    }
+  }
+
   // Handle file input change
   const handleFileInputChange = (e) => {
     const files = Array.from(e.target.files || [])
-    handleImport(files)
     e.target.value = ''
+    ;(async () => {
+      if (await maybeOpenSequenceImport(files)) return
+      handleImport(files)
+    })()
   }
 
   const handleImportFcpXml = async () => {
@@ -699,13 +793,16 @@ function AssetsPanel({ isActive = true }) {
     if (isInternalAssetDrag || isInternalSequenceDrag) return
 
     const files = Array.from(e.dataTransfer.files || [])
-    const validFiles = files.filter(f => {
-      const ext = '.' + f.name.split('.').pop().toLowerCase()
-      return ALL_SUPPORTED.includes(ext)
-    })
-    if (validFiles.length > 0) {
-      handleImport(validFiles)
-    }
+    ;(async () => {
+      if (await maybeOpenSequenceImport(files)) return
+      const validFiles = files.filter(f => {
+        const ext = '.' + f.name.split('.').pop().toLowerCase()
+        return ALL_SUPPORTED.includes(ext)
+      })
+      if (validFiles.length > 0) {
+        handleImport(validFiles)
+      }
+    })()
   }
   
   // Open file picker
@@ -1105,7 +1202,50 @@ function AssetsPanel({ isActive = true }) {
     })
   }
 
-  // Handle double-click to preview
+  // Reveal-in-assets (timeline clip menu / Shift+F): App.jsx has already made
+  // this panel visible; navigate to the asset's folder in both view modes,
+  // select it, and flash it into view. The flash class is applied to the DOM
+  // node directly — no re-render for a transient highlight.
+  useEffect(() => {
+    const handleReveal = (event) => {
+      const assetId = event?.detail?.assetId
+      if (!assetId) return
+      const asset = useAssetsStore.getState().assets.find((entry) => entry.id === assetId)
+      if (!asset) return
+      if (searchQuery.trim()) setSearchQuery('')
+      const folderId = asset.folderId ?? null
+      setCurrentFolderId(folderId)
+      if (folderId) {
+        setExpandedFolderIds((prev) => {
+          const next = new Set(prev)
+          const folderById = new Map((useAssetsStore.getState().folders || []).map((folder) => [folder.id, folder]))
+          let cursor = folderId
+          while (cursor && !next.has(cursor)) {
+            next.add(cursor)
+            cursor = folderById.get(cursor)?.parentId ?? null
+          }
+          return next
+        })
+      }
+      setSelectedAssetIds([assetId])
+      // Give the folder/selection state a beat to commit and lay out, then
+      // scroll and pulse. A timer (not rAF) so this also runs when the
+      // window is occluded — rAF is throttled to zero there.
+      window.setTimeout(() => {
+        const el = panelRef.current?.querySelector?.(`[data-asset-id="${CSS.escape(assetId)}"]`)
+        if (!el) return
+        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        el.classList.add('asset-reveal-flash')
+        window.setTimeout(() => el.classList.remove('asset-reveal-flash'), 1700)
+      }, 60)
+    }
+    window.addEventListener('vidwright-reveal-asset', handleReveal)
+    return () => window.removeEventListener('vidwright-reveal-asset', handleReveal)
+  }, [searchQuery])
+
+  // Handle double-click: flip the preview monitor to asset mode. For
+  // video/audio the source controls (mark In/Out, insert the range —
+  // issue #89) appear under the monitor.
   const handleDoubleClick = (asset) => {
     if (timelineIsPlaying) {
       timelineTogglePlay()
@@ -1247,6 +1387,22 @@ function AssetsPanel({ isActive = true }) {
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [selectedAssetIds, editingId, removeAsset, requestConfirm, confirmDialog, clearTimelineSelection, deleteAssetFilesOnly, shouldDeleteFromDisk])
+
+  // After an asset is dropped onto the timeline, the source tile still holds
+  // panel selection and keyboard focus, so the next Delete press would ask to
+  // delete the ASSET instead of the just-placed clip. Release both — the
+  // timeline selected the new clip on drop, so Delete then targets that.
+  useEffect(() => {
+    const handleTimelineAssetsDropped = () => {
+      setSelectedAssetIds([])
+      const active = document.activeElement
+      if (active && panelRef.current?.contains(active) && typeof active.blur === 'function') {
+        active.blur()
+      }
+    }
+    window.addEventListener('vidwright-timeline-assets-dropped', handleTimelineAssetsDropped)
+    return () => window.removeEventListener('vidwright-timeline-assets-dropped', handleTimelineAssetsDropped)
+  }, [])
   
   // Handle folder click
   const handleFolderClick = (folderId) => {
@@ -1864,6 +2020,7 @@ function AssetsPanel({ isActive = true }) {
                 <div
                   key={asset.id}
                   data-is-asset
+                  data-asset-id={asset.id}
                   draggable
                   style={{
                     paddingLeft: (depth + 1) * 14,
@@ -1924,7 +2081,7 @@ function AssetsPanel({ isActive = true }) {
         ref={fileInputRef}
         type="file"
         multiple
-        accept={ALL_SUPPORTED.join(',')}
+        accept={PICKER_ACCEPT}
         onChange={handleFileInputChange}
         className="hidden"
       />
@@ -2240,6 +2397,7 @@ function AssetsPanel({ isActive = true }) {
                 <div
                   key={asset.id}
                   data-is-asset
+                  data-asset-id={asset.id}
                   draggable
                   onDragStart={(e) => startAssetDrag(e, asset.id, idsToMove)}
                   onDragEnd={endAssetDrag}
@@ -2427,6 +2585,7 @@ function AssetsPanel({ isActive = true }) {
                 <div 
                   key={asset.id}
                   data-is-asset
+                  data-asset-id={asset.id}
                   draggable
                   onDragStart={(e) => startAssetDrag(e, asset.id, idsToMove)}
                   onDragEnd={endAssetDrag}
@@ -2484,6 +2643,23 @@ function AssetsPanel({ isActive = true }) {
           </div>
         )}
       </div>
+
+      {sequenceImportPlan && (
+        <ImageSequenceImportDialog
+          plan={sequenceImportPlan}
+          defaultFps={getCurrentTimelineSettings?.()?.fps || 24}
+          busy={sequenceImportBusy}
+          progress={sequenceImportProgress}
+          error={sequenceImportError}
+          onImport={runSequenceImport}
+          onClose={() => {
+            if (!sequenceImportBusy) {
+              setSequenceImportPlan(null)
+              setSequenceImportError('')
+            }
+          }}
+        />
+      )}
 
       <NewTimelineDialog
         isOpen={showNewTimelineDialog}
@@ -2765,6 +2941,43 @@ function AssetsPanel({ isActive = true }) {
                     {isAudioDisabled ? 'Restore audio on video' : 'Remove audio from video'}
                   </button>
                 )}
+
+                {(() => {
+                  const menuAsset = assets.find((candidate) => candidate.id === contextMenu.assetId)
+                  if (!menuAsset || (menuAsset.type !== 'video' && menuAsset.type !== 'audio')) return null
+                  return (
+                    <button
+                      onClick={() => {
+                        if (timelineIsPlaying) {
+                          timelineTogglePlay()
+                        }
+                        setPreview(menuAsset)
+                        setContextMenu(null)
+                      }}
+                      className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+                    >
+                      <Play className="w-3 h-3 text-sf-accent" />
+                      Open in Source Player
+                    </button>
+                  )
+                })()}
+
+                {(() => {
+                  const menuAsset = assets.find((candidate) => candidate.id === contextMenu.assetId)
+                  if (!menuAsset || !canRevealAssetInFileManager(menuAsset)) return null
+                  return (
+                    <button
+                      onClick={() => {
+                        void revealAssetInFileManager(menuAsset)
+                        setContextMenu(null)
+                      }}
+                      className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+                    >
+                      <FolderOpen className="w-3 h-3 text-sf-text-muted" />
+                      {getRevealInFileManagerLabel()}
+                    </button>
+                  )
+                })()}
 
                 {showUpscale && (
                   <button

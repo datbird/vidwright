@@ -112,8 +112,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   mixAudio: (options) => ipcRenderer.invoke('export:mixAudio', options),
 
+  /**
+   * Encode a mixed WAV into a delivery audio format (audio-only export)
+   * @param {Object} options - { inputPath, outputPath, audioCodec, audioBitrateKbps, audioSampleRate, audioChannels, normalizeAudio, loudnessTarget }
+   */
+  encodeAudioFile: (options) => ipcRenderer.invoke('export:encodeAudioFile', options),
+
   // Export worker (run export in separate window so main UI stays responsive)
   runExportInWorker: (payload) => ipcRenderer.invoke('export:runInWorker', payload),
+  cancelExport: () => ipcRenderer.invoke('export:cancel'),
+  onExportCancel: (cb) => {
+    ipcRenderer.on('export:cancel-job', () => cb())
+  },
   onExportProgress: (cb) => {
     ipcRenderer.on('export:progress', (_, data) => cb(data))
   },
@@ -138,11 +148,51 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkNvenc: () => ipcRenderer.invoke('export:checkNvenc'),
 
   /**
+   * Make a local source safe for the renderer's decoders. mode 'remux'
+   * (default): already-fast-start files are reused, other containers are
+   * stream-copied to a temporary video-only MP4 without re-encoding. mode
+   * 'transcode': sources whose codec the renderer cannot decode (ProRes,
+   * DNx, ...) are re-encoded to a visually-transparent H.264 intermediate.
+   * @param {{ inputPath: string, outputPath: string, mode?: 'remux' | 'transcode' }}
+   * @returns {Promise<{ success: boolean, prepared?: boolean, outputPath?: string, error?: string }>}
+   */
+  prepareVideoSourceForExport: (options) => ipcRenderer.invoke('export:prepareVideoSource', options),
+
+  /**
+   * Read one bounded byte range of a local file (export frame source
+   * windowed reads — the renderer's file:// fetch ignores Range headers).
+   * @param {{ path: string, start: number, length: number }}
+   * @returns {Promise<{ success: boolean, bytes?: ArrayBuffer, fileSize?: number, eof?: boolean, error?: string }>}
+   */
+  readFileRange: (options) => ipcRenderer.invoke('media:readFileRange', options),
+
+  /**
    * Transcode video for playback cache (same resolution, constant-FPS H.264, keyframe every 6, no B-frames)
    * @param {{ inputPath: string, outputPath: string }}
    * @returns {Promise<{ success: boolean, error?: string }>}
    */
   transcodeForPlayback: (options) => ipcRenderer.invoke('playback:transcode', options),
+
+  /**
+   * Transcode a numbered image sequence (ordered frame paths + per-frame hold
+   * durations) into an editing intermediate: H.264 mp4, or VP9 webm when the
+   * frames carry alpha. Returns { success, outputPath, alpha, width, height,
+   * duration } — the caller imports the result like any video file.
+   * @param {{ entries: Array<{path: string, duration: number}>, fps: number,
+   *   outputDir: string, baseName: string, alpha?: boolean|'auto',
+   *   applyTrc?: string|null, jobId?: string }}
+   */
+  transcodeImageSequence: (options) => ipcRenderer.invoke('imageSequence:transcode', options),
+
+  /**
+   * Progress events for transcodeImageSequence jobs: { jobId, frame,
+   * totalFrames }. Returns an unsubscribe function.
+   */
+  onImageSequenceProgress: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('imageSequence:progress', handler)
+    return () => ipcRenderer.removeListener('imageSequence:progress', handler)
+  },
 
   /**
    * Transcode video to a low-res proxy (default 540p, CRF 28, keyframe every 6)
@@ -320,6 +370,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mixTimelineAudioForCaptions: (options = {}) => ipcRenderer.invoke('captions:mixTimelineAudio', options),
 
   /**
+   * Local caption engine (whisper.cpp in the main process). Status reports
+   * binary/model availability; install downloads them into userData; the
+   * transcribe call returns word-level timings.
+   */
+  whisperEngineStatus: () => ipcRenderer.invoke('captions:whisperStatus'),
+  whisperEngineInstall: (options = {}) => ipcRenderer.invoke('captions:whisperInstall', options),
+  whisperTranscribe: (options = {}) => ipcRenderer.invoke('captions:whisperTranscribe', options),
+  whisperRemoveModel: (options = {}) => ipcRenderer.invoke('captions:whisperRemoveModel', options),
+
+  /**
    * Get a direct file:// URL for a local file
    * @param {string} filePath 
    * @returns {Promise<string>}
@@ -382,6 +442,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   captureComfyWorkflowGraph: (payload = {}) => ipcRenderer.invoke('comfyui:captureWorkflowGraph', payload),
   focusRendererWindow: () => ipcRenderer.invoke('window:focusRenderer'),
   openExternalUrl: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  showItemInFolder: (targetPath) => ipcRenderer.invoke('shell:showItemInFolder', targetPath),
   installWorkflowSetup: (payload = {}) => ipcRenderer.invoke('workflowSetup:install', payload),
   onWorkflowSetupProgress: (cb) => {
     const handler = (_, data) => cb(data)
@@ -392,6 +453,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_, data) => cb(data)
     ipcRenderer.on('download:progress', handler)
     return () => ipcRenderer.removeListener('download:progress', handler)
+  },
+  onCaptionEngineProgress: (cb) => {
+    const handler = (_, data) => cb(data)
+    ipcRenderer.on('captions:engineProgress', handler)
+    return () => ipcRenderer.removeListener('captions:engineProgress', handler)
   },
 
   // ============================================

@@ -1,18 +1,14 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react'
 import { RefreshCw, ExternalLink, Loader2, BookmarkPlus } from 'lucide-react'
 import TitleBar from './components/TitleBar'
 import ExportPanel from './components/ExportPanel'
-import GenerateWorkspace from './components/GenerateWorkspace'
-import FlowAIWorkspace from './components/FlowAIWorkspace'
-import AgentWorkspace from './components/AgentWorkspace'
-import MOGWorkspace from './components/MOGWorkspace'
-import StockPanel from './components/StockPanel'
 import WorkspaceErrorBoundary from './components/WorkspaceErrorBoundary'
 import LeftPanel from './components/LeftPanel'
 import PreviewPanel from './components/PreviewPanel'
 import Timeline from './components/Timeline'
 import DopeSheet from './components/DopeSheet'
 import MixerPanel from './components/MixerPanel'
+import ScopesPanel from './components/ScopesPanel'
 import TransportControls from './components/TransportControls'
 import InspectorPanel from './components/InspectorPanel'
 import ResizeHandle from './components/ResizeHandle'
@@ -34,6 +30,25 @@ import { startComfyLauncherEventBridge } from './services/comfyLauncherEventBrid
 import { startComfyAutoImport } from './services/comfyAutoImport'
 import { startMcpSnapshotPublisher } from './services/mcpSnapshot'
 import { MCP_ACTION_BRIDGE_VERSION, startMcpActionBridge } from './services/mcpActions'
+import { attachProjectDirtyWatchers, isProjectDirty } from './services/projectDirtyTracker'
+
+// Tab workspaces load on first visit instead of shipping in the startup
+// bundle. This keeps launch parse time down; GenerateWorkspace alone carries
+// jspdf, and FlowAI carries @xyflow/react. The editor path (Timeline,
+// PreviewPanel) and ExportPanel stay eager: the editor is the default tab,
+// and ExportPanel hosts the renderer-side export engine that MCP-driven
+// exports rely on.
+const GenerateWorkspace = lazy(() => import('./components/GenerateWorkspace'))
+const FlowAIWorkspace = lazy(() => import('./components/FlowAIWorkspace'))
+const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
+const MOGWorkspace = lazy(() => import('./components/MOGWorkspace'))
+const StockPanel = lazy(() => import('./components/StockPanel'))
+
+const WORKSPACE_LOADING_FALLBACK = (
+  <div className="flex-1 flex items-center justify-center bg-sf-dark-950 text-xs text-sf-text-muted">
+    Loading…
+  </div>
+)
 
 function formatDownloadBytes(bytes) {
   const numeric = Math.max(0, Number(bytes) || 0)
@@ -56,8 +71,10 @@ function App() {
   const [selectedItem, setSelectedItem] = useState({ type: 'shot', id: '2.1' })
   const [mainTab, setMainTab] = useState('editor')
   const [hasMountedFlowAi, setHasMountedFlowAi] = useState(false)
+  const [hasMountedGenerate, setHasMountedGenerate] = useState(false)
   const [bottomEditorView, setBottomEditorView] = useState('timeline')
   const [activeTimelineToolLabel, setActiveTimelineToolLabel] = useState('Move tool')
+  const [timelineStatusText, setTimelineStatusText] = useState('')
   const [downloadProgressItems, setDownloadProgressItems] = useState([])
   const mainTabRef = useRef(mainTab)
   const downloadDismissTimersRef = useRef(new Map())
@@ -69,11 +86,16 @@ function App() {
   
   // Right panel (Inspector) state
   const [inspectorExpanded, setInspectorExpanded] = useState(true)
+  const [inspectorFullHeight, setInspectorFullHeight] = useState(false) // Resolve-style full height mode
   
   // Panel sizes (in pixels)
   const [leftPanelWidth, setLeftPanelWidth] = useState(280) // Content panel width (icon bar is 48px additional)
   const [inspectorWidth, setInspectorWidth] = useState(256) // Content panel width (icon bar is 48px additional)
   const [timelineHeight, setTimelineHeight] = useState(320) // Default: enough room for track headers; persisted in localStorage
+  // Editor layout preset: 'default' | 'vertical' (tall preview column on the
+  // left — made for 9:16 work).
+  const [editorLayout, setEditorLayout] = useState('default')
+  const [verticalPreviewWidth, setVerticalPreviewWidth] = useState(420)
 
   // Min/max constraints
   const ICON_BAR_WIDTH = 48 // Fixed icon toolbar width
@@ -83,6 +105,8 @@ function App() {
   const MAX_INSPECTOR = 800 // Content panel max
   const MIN_TIMELINE = 180 // Accounts for transport controls (40px) + minimum timeline
   const MAX_TIMELINE = 900
+  const MIN_VERTICAL_PREVIEW = 280
+  const MAX_VERTICAL_PREVIEW = 1200
 
   const LAYOUT_STORAGE_KEY = 'vidwright-editor-layout'
   const [comfyIframeUrl, setComfyIframeUrl] = useState(() => getLocalComfyHttpBaseSync())
@@ -205,6 +229,17 @@ function App() {
     return () => { try { stop?.() } catch (_) { /* ignore */ } }
   }, [])
 
+  // Track unsaved changes so autosave can skip the full save path (project
+  // serialization + thumbnail capture + disk writes) when nothing changed.
+  useEffect(() => {
+    const stop = attachProjectDirtyWatchers({
+      timelineStore: useTimelineStore,
+      assetsStore: useAssetsStore,
+      projectStore: useProjectStore,
+    })
+    return () => { try { stop?.() } catch (_) { /* ignore */ } }
+  }, [])
+
   useEffect(() => {
     const stop = startMcpActionBridge()
     return () => { try { stop?.() } catch (_) { /* ignore */ } }
@@ -290,6 +325,9 @@ function App() {
     if (mainTab === 'flow-ai') {
       setHasMountedFlowAi(true)
     }
+    if (mainTab === 'generate') {
+      setHasMountedGenerate(true)
+    }
   }, [mainTab])
 
   // When user sends timeline frame to Generate (right-click preview → Extend with AI / Starting keyframe for AI)
@@ -303,6 +341,19 @@ function App() {
     const handler = () => setMainTab('generate')
     window.addEventListener('vidwright-open-generate-tab', handler)
     return () => window.removeEventListener('vidwright-open-generate-tab', handler)
+  }, [])
+
+  // Reveal-in-assets (timeline clip menu / Shift+F): make sure the Assets
+  // panel is actually visible — editor tab, left panel expanded, Assets tab.
+  // AssetsPanel handles the rest (folder, selection, scroll, flash).
+  useEffect(() => {
+    const handler = () => {
+      setMainTab('editor')
+      setLeftPanelTab('assets')
+      setLeftPanelExpanded(true)
+    }
+    window.addEventListener('vidwright-reveal-asset', handler)
+    return () => window.removeEventListener('vidwright-reveal-asset', handler)
   }, [])
 
   // Allow Generate tab to open ComfyUI directly (used for workflow import guidance).
@@ -333,6 +384,14 @@ function App() {
         }
         if (typeof saved.leftPanelExpanded === 'boolean') setLeftPanelExpanded(saved.leftPanelExpanded)
         if (typeof saved.inspectorExpanded === 'boolean') setInspectorExpanded(saved.inspectorExpanded)
+        if (typeof saved.leftPanelFullHeight === 'boolean') setLeftPanelFullHeight(saved.leftPanelFullHeight)
+        if (typeof saved.inspectorFullHeight === 'boolean') setInspectorFullHeight(saved.inspectorFullHeight)
+        if (saved.editorLayout === 'default' || saved.editorLayout === 'vertical') {
+          setEditorLayout(saved.editorLayout)
+        }
+        if (typeof saved.verticalPreviewWidth === 'number' && saved.verticalPreviewWidth >= MIN_VERTICAL_PREVIEW && saved.verticalPreviewWidth <= MAX_VERTICAL_PREVIEW) {
+          setVerticalPreviewWidth(saved.verticalPreviewWidth)
+        }
       }
     } catch (_) { /* ignore */ }
     setLayoutLoaded(true)
@@ -381,15 +440,24 @@ function App() {
     initialize()
   }, [initialize])
   
-  // Auto-save functionality
+  // Auto-save functionality. Saves only when something actually changed —
+  // the save path serializes the whole project and captures a playhead
+  // thumbnail, which is far too heavy to run on a fixed timer at idle. The
+  // backstop save caps worst-case loss if a mutation ever slips past the
+  // dirty tracker (e.g. an in-place edit that keeps the same reference).
   useEffect(() => {
     if (!currentProject || !autoSaveEnabled) return
-    
+
+    const AUTOSAVE_BACKSTOP_MS = 5 * 60 * 1000
     const autoSaveTimer = setInterval(() => {
+      const lastSavedAt = Date.parse(useProjectStore.getState().lastAutoSave || '') || 0
+      const overdue = Date.now() - lastSavedAt > AUTOSAVE_BACKSTOP_MS
+      const dirty = isProjectDirty()
+      if (!dirty && !overdue) return
       saveProject()
-      console.log('Auto-saved project')
+      console.log(dirty ? 'Auto-saved project' : 'Auto-saved project (backstop)')
     }, autoSaveInterval)
-    
+
     return () => clearInterval(autoSaveTimer)
   }, [currentProject, autoSaveEnabled, autoSaveInterval, saveProject])
   
@@ -407,11 +475,14 @@ function App() {
 
   // Resize handlers
   const handleLeftPanelResize = useCallback((clientX) => {
-    const contentWidth = clientX - ICON_BAR_WIDTH
+    // In the vertical layout the preview column sits left of the panel, so
+    // the panel's left edge is offset by that column (plus its resize handle).
+    const layoutOffset = editorLayout === 'vertical' ? verticalPreviewWidth + 4 : 0
+    const contentWidth = clientX - layoutOffset - ICON_BAR_WIDTH
     const newWidth = Math.min(MAX_LEFT_PANEL, Math.max(MIN_LEFT_PANEL, contentWidth))
     setLeftPanelWidth(newWidth)
     persistLayout({ leftPanelWidth: newWidth })
-  }, [persistLayout])
+  }, [persistLayout, editorLayout, verticalPreviewWidth])
 
   const handleInspectorResize = useCallback((clientX) => {
     const contentWidth = window.innerWidth - clientX - ICON_BAR_WIDTH
@@ -424,6 +495,18 @@ function App() {
     const newHeight = Math.min(MAX_TIMELINE, Math.max(MIN_TIMELINE, window.innerHeight - clientY))
     setTimelineHeight(newHeight)
     persistLayout({ timelineHeight: newHeight })
+  }, [persistLayout])
+
+  const handleEditorLayoutChange = useCallback((mode) => {
+    if (mode !== 'default' && mode !== 'vertical') return
+    setEditorLayout(mode)
+    persistLayout({ editorLayout: mode })
+  }, [persistLayout])
+
+  const handleVerticalPreviewResize = useCallback((clientX) => {
+    const newWidth = Math.min(MAX_VERTICAL_PREVIEW, Math.max(MIN_VERTICAL_PREVIEW, clientX))
+    setVerticalPreviewWidth(newWidth)
+    persistLayout({ verticalPreviewWidth: newWidth })
   }, [persistLayout])
 
   const handleToggleLeftPanelExpanded = useCallback(() => {
@@ -441,6 +524,27 @@ function App() {
       return next
     })
   }, [persistLayout])
+
+  const handleToggleLeftPanelFullHeight = useCallback(() => {
+    setLeftPanelFullHeight(prev => {
+      const next = !prev
+      persistLayout({ leftPanelFullHeight: next })
+      return next
+    })
+  }, [persistLayout])
+
+  const handleToggleInspectorFullHeight = useCallback(() => {
+    setInspectorFullHeight(prev => {
+      const next = !prev
+      persistLayout({ inspectorFullHeight: next })
+      return next
+    })
+  }, [persistLayout])
+
+  // Both sides full height can't coexist in the vertical layout (the center
+  // column would be dead space above the timeline) — the left panel wins and
+  // the inspector regains full height when the left panel drops it.
+  const inspectorFullHeightActive = inspectorFullHeight && !(editorLayout === 'vertical' && leftPanelFullHeight)
 
   const handleActiveTimelineToolChange = useCallback((label) => {
     setActiveTimelineToolLabel(label || 'Move tool')
@@ -482,10 +586,12 @@ function App() {
   return (
     <div className="relative h-screen flex flex-col bg-sf-dark-950 no-select">
       {/* Title Bar */}
-      <TitleBar 
-        projectName={currentProject?.name || 'Untitled'} 
+      <TitleBar
+        projectName={currentProject?.name || 'Untitled'}
         activeTab={mainTab}
         onTabChange={setMainTab}
+        editorLayout={editorLayout}
+        onEditorLayoutChange={handleEditorLayoutChange}
       />
 
       {showMediaPreparation && (
@@ -652,30 +758,43 @@ function App() {
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
           />
         </div>
-        {/* Generate tab – keep mounted so queue/progress survives tab switches */}
-        <div
-          className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950"
-          style={{ display: mainTab === 'generate' ? 'flex' : 'none' }}
-        >
-          <GenerateWorkspace
-            key={`generate-workspace-${projectSessionKey}`}
-            onOpenWorkflowSetup={() => openSettingsModal(WORKFLOW_SETUP_SECTION_ID)}
-          />
-        </div>
+        {/* Generate tab – mounted on first visit, then kept mounted so
+            queue/progress survives tab switches. MCP music-video tools open
+            this tab via the vidwright-open-generate-tab event before their
+            readiness probe, so first mount happens before they need it. */}
+        {hasMountedGenerate && (
+          <div
+            className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950"
+            style={{ display: mainTab === 'generate' ? 'flex' : 'none' }}
+          >
+            <WorkspaceErrorBoundary>
+              <Suspense fallback={WORKSPACE_LOADING_FALLBACK}>
+                <GenerateWorkspace
+                  key={`generate-workspace-${projectSessionKey}`}
+                  onOpenWorkflowSetup={() => openSettingsModal(WORKFLOW_SETUP_SECTION_ID)}
+                />
+              </Suspense>
+            </WorkspaceErrorBoundary>
+          </div>
+        )}
         {hasMountedFlowAi && (
           <div
             className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950"
             style={{ display: mainTab === 'flow-ai' ? 'flex' : 'none' }}
           >
             <WorkspaceErrorBoundary>
-              <FlowAIWorkspace onOpenWorkflowSetup={() => openSettingsModal(WORKFLOW_SETUP_SECTION_ID)} />
+              <Suspense fallback={WORKSPACE_LOADING_FALLBACK}>
+                <FlowAIWorkspace onOpenWorkflowSetup={() => openSettingsModal(WORKFLOW_SETUP_SECTION_ID)} />
+              </Suspense>
             </WorkspaceErrorBoundary>
           </div>
         )}
         {mainTab === 'mog' && (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950">
             <WorkspaceErrorBoundary>
-              <MOGWorkspace />
+              <Suspense fallback={WORKSPACE_LOADING_FALLBACK}>
+                <MOGWorkspace />
+              </Suspense>
             </WorkspaceErrorBoundary>
           </div>
         )}
@@ -687,10 +806,18 @@ function App() {
           <ExportPanel />
         </div>
         {mainTab === "stock" && (
-          <StockPanel />
+          <WorkspaceErrorBoundary>
+            <Suspense fallback={WORKSPACE_LOADING_FALLBACK}>
+              <StockPanel />
+            </Suspense>
+          </WorkspaceErrorBoundary>
         )}
         {mainTab === "agent" && (
-          <AgentWorkspace />
+          <WorkspaceErrorBoundary>
+            <Suspense fallback={WORKSPACE_LOADING_FALLBACK}>
+              <AgentWorkspace />
+            </Suspense>
+          </WorkspaceErrorBoundary>
         )}
         {/* Editor tab: unmount when hidden so video/canvas preview resources are released before Generate opens. */}
         {mainTab === "editor" && (
@@ -698,6 +825,24 @@ function App() {
           className="flex-1 flex min-h-0 overflow-hidden bg-sf-dark-950"
         >
           <>
+            {/* Vertical layout: full-height preview column on the far left
+                (9:16 work), with the transport directly under the viewer. */}
+            {editorLayout === 'vertical' && (
+              <>
+                <div style={{ width: verticalPreviewWidth }} className="flex-shrink-0 flex flex-col min-h-0">
+                  <div className="flex-1 min-h-0">
+                    <PreviewPanel />
+                  </div>
+                  <div className="flex-shrink-0 flex items-center justify-center py-1 border-t border-sf-dark-700">
+                    <TransportControls />
+                  </div>
+                </div>
+                <ResizeHandle
+                  direction="horizontal"
+                  onResize={handleVerticalPreviewResize}
+                />
+              </>
+            )}
             {/* Left Panel - Full Height Mode (spans entire left side) */}
             {leftPanelFullHeight && (
               <>
@@ -712,7 +857,7 @@ function App() {
                     activeTab={leftPanelTab}
                     onTabChange={setLeftPanelTab}
                     isFullHeight={true}
-                    onToggleFullHeight={() => setLeftPanelFullHeight(false)}
+                    onToggleFullHeight={handleToggleLeftPanelFullHeight}
                     onSettingsClick={() => setSettingsModalOpen(true)}
                   />
                 </div>
@@ -730,69 +875,95 @@ function App() {
             <div className="flex-1 flex flex-col min-w-0">
               {/* Upper Content Area - Preview + Inspector */}
               <div className="flex-1 flex overflow-hidden min-h-0">
-                {/* Left Panel - Normal Mode (only in upper area) */}
+                {/* Left Panel - Normal Mode (only in upper area). In the
+                    vertical layout the preview leaves this row, so an expanded
+                    panel stretches to use the freed width. */}
                 {!leftPanelFullHeight && (
                   <>
-                    <div 
-                      style={{ width: leftPanelExpanded ? ICON_BAR_WIDTH + leftPanelWidth : ICON_BAR_WIDTH }} 
-                      className="flex-shrink-0 transition-[width] duration-200 ease-out"
+                    <div
+                      style={editorLayout === 'vertical' && leftPanelExpanded
+                        ? undefined
+                        : { width: leftPanelExpanded ? ICON_BAR_WIDTH + leftPanelWidth : ICON_BAR_WIDTH }}
+                      className={`${editorLayout === 'vertical' && leftPanelExpanded ? 'flex-1 min-w-0' : 'flex-shrink-0'} transition-[width] duration-200 ease-out`}
                     >
-                      <LeftPanel 
+                      <LeftPanel
                         isActive={mainTab === 'editor'}
                         isExpanded={leftPanelExpanded}
                         onToggleExpanded={handleToggleLeftPanelExpanded}
                         activeTab={leftPanelTab}
                         onTabChange={setLeftPanelTab}
                         isFullHeight={false}
-                        onToggleFullHeight={() => setLeftPanelFullHeight(true)}
+                        onToggleFullHeight={handleToggleLeftPanelFullHeight}
                         onSettingsClick={() => setSettingsModalOpen(true)}
                       />
                     </div>
-                    {/* Resize Handle - Left Panel (only when expanded) */}
-                    {leftPanelExpanded && (
-                      <ResizeHandle 
-                        direction="horizontal" 
+                    {/* Resize Handle - Left Panel (fixed width layouts only) */}
+                    {leftPanelExpanded && editorLayout !== 'vertical' && (
+                      <ResizeHandle
+                        direction="horizontal"
                         onResize={handleLeftPanelResize}
                       />
                     )}
+                    {editorLayout === 'vertical' && !leftPanelExpanded && (
+                      <div className="flex-1 min-w-0" />
+                    )}
                   </>
                 )}
-                
-                {/* Center - Preview */}
-                <div className="flex-1 min-w-0">
-                  <PreviewPanel />
-                </div>
-                
-                {/* Resize Handle - Inspector (only when expanded) */}
-                {inspectorExpanded && (
-                  <ResizeHandle 
-                    direction="horizontal" 
-                    onResize={handleInspectorResize}
-                  />
+
+                {/* Center - Preview (in the vertical layout it lives in the
+                    dedicated left column instead) */}
+                {editorLayout !== 'vertical' && (
+                  <div className="flex-1 min-w-0">
+                    <PreviewPanel />
+                  </div>
                 )}
-                
-                {/* Right Sidebar - Inspector with Icon Toolbar */}
-                <div 
-                  style={{ width: inspectorExpanded ? inspectorWidth + ICON_BAR_WIDTH : ICON_BAR_WIDTH }} 
-                  className="flex-shrink-0 transition-[width] duration-200 ease-out"
-                >
-                  <InspectorPanel 
-                    selectedItem={selectedItem}
-                    isExpanded={inspectorExpanded}
-                    onToggleExpanded={handleToggleInspectorExpanded}
-                  />
-                </div>
+
+                {/* Vertical + full-height panel: keep the inspector pinned right */}
+                {editorLayout === 'vertical' && leftPanelFullHeight && (
+                  <div className="flex-1 min-w-0" />
+                )}
+
+                {/* Inspector - Normal Mode (only in upper area) */}
+                {!inspectorFullHeightActive && (
+                  <>
+                    {/* Resize Handle - Inspector (only when expanded) */}
+                    {inspectorExpanded && (
+                      <ResizeHandle
+                        direction="horizontal"
+                        onResize={handleInspectorResize}
+                      />
+                    )}
+
+                    {/* Right Sidebar - Inspector with Icon Toolbar */}
+                    <div
+                      style={{ width: inspectorExpanded ? inspectorWidth + ICON_BAR_WIDTH : ICON_BAR_WIDTH }}
+                      className="flex-shrink-0 transition-[width] duration-200 ease-out"
+                    >
+                      <InspectorPanel
+                        selectedItem={selectedItem}
+                        isExpanded={inspectorExpanded}
+                        onToggleExpanded={handleToggleInspectorExpanded}
+                        isFullHeight={false}
+                        onToggleFullHeight={handleToggleInspectorFullHeight}
+                        fullHeightDisabled={editorLayout === 'vertical' && leftPanelFullHeight}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
               
               {/* Resize Handle - Timeline */}
-              <ResizeHandle 
-                direction="vertical" 
+              <ResizeHandle
+                direction="vertical"
                 onResize={handleTimelineResize}
               />
-              
+
               {/* Bottom Section - Transport (centered to viewer) + Timeline */}
               <div style={{ height: timelineHeight }} className="flex-shrink-0 w-full flex flex-col min-h-0">
-                {/* Transport row - same columns as Preview row so play button is centered under viewer */}
+                {/* Transport row - same columns as Preview row so play button
+                    is centered under viewer. The vertical layout renders the
+                    transport inside the preview column instead. */}
+                {editorLayout !== 'vertical' && (
                 <div className="flex-shrink-0 w-full flex min-h-0">
                   {!leftPanelFullHeight && (
                     <div
@@ -804,12 +975,15 @@ function App() {
                   <div className="flex-1 min-w-0 flex items-center justify-center">
                     <TransportControls />
                   </div>
-                  <div
-                    style={{ width: inspectorExpanded ? inspectorWidth + ICON_BAR_WIDTH : ICON_BAR_WIDTH }}
-                    className="flex-shrink-0 transition-[width] duration-200 ease-out"
-                    aria-hidden
-                  />
+                  {!inspectorFullHeightActive && (
+                    <div
+                      style={{ width: inspectorExpanded ? inspectorWidth + ICON_BAR_WIDTH : ICON_BAR_WIDTH }}
+                      className="flex-shrink-0 transition-[width] duration-200 ease-out"
+                      aria-hidden
+                    />
+                  )}
                 </div>
+                )}
                 {/* Bottom editor view switcher */}
                 <div className="flex-shrink-0 h-7 px-2 bg-sf-dark-900 border-y border-sf-dark-700 flex items-center justify-between">
                   <div className="flex items-center gap-1">
@@ -846,13 +1020,26 @@ function App() {
                     >
                       Mixer
                     </button>
+                    <button
+                      onClick={() => setBottomEditorView('scopes')}
+                      className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                        bottomEditorView === 'scopes'
+                          ? 'bg-sf-accent/20 text-sf-accent border border-sf-accent/40'
+                          : 'bg-sf-dark-700 text-sf-text-muted hover:bg-sf-dark-600'
+                      }`}
+                      title="Video scopes: luma waveform, RGB parade, vectorscope"
+                    >
+                      Scopes
+                    </button>
                   </div>
                   <span className="text-[10px] text-sf-text-muted">
                     {bottomEditorView === 'timeline'
-                      ? `Timeline · ${activeTimelineToolLabel}`
+                      ? `${timelineStatusText ? `${timelineStatusText} · ` : ''}Timeline · ${activeTimelineToolLabel}`
                       : bottomEditorView === 'mixer'
                         ? 'Audio mixer'
-                        : 'Keyframe edit mode'}
+                        : bottomEditorView === 'scopes'
+                          ? 'Video scopes'
+                          : 'Keyframe edit mode'}
                   </span>
                 </div>
                 {/* Selected bottom editor view - takes remaining height */}
@@ -860,15 +1047,43 @@ function App() {
                   {bottomEditorView === 'timeline' ? (
                     <Timeline
                       onActiveToolChange={handleActiveTimelineToolChange}
+                      onStatusChange={setTimelineStatusText}
                     />
                   ) : bottomEditorView === 'mixer' ? (
                     <MixerPanel />
+                  ) : bottomEditorView === 'scopes' ? (
+                    <ScopesPanel />
                   ) : (
                     <DopeSheet />
                   )}
                 </div>
               </div>
             </div>
+
+            {/* Inspector - Full Height Mode (spans entire right side) */}
+            {inspectorFullHeightActive && (
+              <>
+                {/* Resize Handle for full-height inspector */}
+                {inspectorExpanded && (
+                  <ResizeHandle
+                    direction="horizontal"
+                    onResize={handleInspectorResize}
+                  />
+                )}
+                <div
+                  style={{ width: inspectorExpanded ? inspectorWidth + ICON_BAR_WIDTH : ICON_BAR_WIDTH }}
+                  className="flex-shrink-0 transition-[width] duration-200 ease-out h-full"
+                >
+                  <InspectorPanel
+                    selectedItem={selectedItem}
+                    isExpanded={inspectorExpanded}
+                    onToggleExpanded={handleToggleInspectorExpanded}
+                    isFullHeight={true}
+                    onToggleFullHeight={handleToggleInspectorFullHeight}
+                  />
+                </div>
+              </>
+            )}
           </>
         </div>
         )}

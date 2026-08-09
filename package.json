@@ -1,6 +1,6 @@
 {
   "name": "vidwright",
-  "version": "0.3.2",
+  "version": "0.3.23",
   "description": "AI-native video editing built around real creative timelines, generative workflows, and local agent control.",
   "main": "electron/main.js",
   "scripts": {
@@ -17,7 +17,16 @@
     "electron:pack": "npm run build && electron-builder --dir",
     "angles:sheet": "node ./scripts/build-angle-sheet.mjs",
     "starter-pack:build": "node ./scripts/build-workflow-starter-pack.mjs",
-    "starter-pack:package": "npm run starter-pack:build && node ./scripts/package-workflow-starter-pack.mjs"
+    "starter-pack:package": "npm run starter-pack:build && node ./scripts/package-workflow-starter-pack.mjs",
+    "test:asset-relink-fallback": "node --experimental-default-type=module --test ./src/services/assetRelinkFallback.test.js",
+    "test:caption-vocabulary": "node --experimental-default-type=module --test ./src/services/captionVocabulary.test.js",
+    "test:caption-word-timing": "node --experimental-default-type=module --test ./src/services/captionWordTiming.test.js",
+    "test:music-visual-style": "node --experimental-default-type=module --test ./src/utils/musicVisualStyle.test.js",
+    "test:dirty-tracker": "node --experimental-default-type=module --test ./src/services/projectDirtyTracker.test.js",
+    "test:premiere-xml": "node --experimental-default-type=module --test ./src/services/premiereXmlExporter.test.js",
+    "test:export-frame-source": "node --experimental-default-type=module --test ./src/services/exportFrameSource.test.js",
+    "test:export-source-preparation": "node --test ./tests/exportSourcePreparation.test.js",
+    "test:mcp-h3": "node --test ./tests/mcpH3ReferenceVideo.test.js"
   },
   "keywords": [
     "animatic",
@@ -28,7 +37,7 @@
     "video-editing",
     "electron"
   ],
-  "author": "Vidwright contributors (a fork of Velorn — https://github.com/VelornLabs/velorn)",
+  "author": "Vidwright contributors (a fork of Vidwright — https://github.com/datbird/vidwright)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/datbird/vidwright.git"

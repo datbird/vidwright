@@ -3,21 +3,24 @@ import {
   Move, RotateCw, Maximize2, Clock, Layers,
   ChevronDown, ChevronRight, ChevronLeft, Sparkles,
   Zap, Eye, SlidersHorizontal, CircleDot, Lock, Unlock,
-  FlipHorizontal, FlipVertical, Link, Unlink, Crop,
+  FlipHorizontal, FlipVertical, Link, Unlink, Crop, MoreHorizontal, PenTool,
   Anchor, RotateCcw, Type, AlignLeft, AlignCenter, AlignRight,
   AlignVerticalJustifyStart, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd,
   Diamond, ChevronFirst, ChevronLast,
   FileVideo, FileImage, FileAudio, HardDrive, Calendar, Info,
   Wand2, Trash2, EyeOff, Plus, Play, Loader2, Check, AlertTriangle, X,
-  Copy, ClipboardPaste, Square
+  Copy, ClipboardPaste, Square, PanelRight, PanelRightClose
 } from 'lucide-react'
 import useTimelineStore, { buildClipSyncLock, isMusicVideoSyncCapableClip, isSyncLockedClip } from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
 import useProjectStore from '../stores/projectStore'
 import renderCacheService from '../services/renderCache'
 import { commitAdjustmentRender } from '../services/commitRender'
+import { LUTS_CHANGED_EVENT, importCubeLutFile, listLoadedLuts, loadLutLibrary } from '../services/lutLibrary'
+import { DEFAULT_SHAPE_MASK, DEFAULT_SPLINE_POINTS, normalizeShapeMask } from '../utils/shapeMask'
+import { isClipBypassed } from '../utils/clipBypass'
 import { saveRenderCache, deleteRenderCache, writeGeneratedOverlayToProject, isElectron } from '../services/fileSystem'
-import { getKeyframeAtTime, getKeyframeTimeTolerance, getAnimatedTransform, getAnimatedAdjustmentSettings, getAnimatedShapeProperties, EASING_OPTIONS } from '../utils/keyframes'
+import { getKeyframeAtTime, getKeyframeTimeTolerance, getAnimatedTransform, getAnimatedAdjustmentSettings, getAnimatedShapeProperties, getAnimatedShapeMask, EASING_OPTIONS } from '../utils/keyframes'
 import { TRACK_MATTE_OPTIONS, normalizeTrackMatte } from '../utils/trackMatte'
 import { CORNER_PIN_CORNERS } from '../utils/cornerPin'
 import { TEXT_ANIMATION_PRESETS, TEXT_ANIMATION_MODE_OPTIONS } from '../utils/textAnimationPresets'
@@ -25,6 +28,9 @@ import {
   COLOR_ADJUSTMENT_KEYS,
   DEFAULT_ADJUSTMENT_SETTINGS,
   getAdjustmentValue,
+  hasAdjustmentGroupEffect,
+  hasLutEffect,
+  hasTonalAdjustmentEffect,
   mergeAdjustmentSettings,
   normalizeAdjustmentSettings,
   setAdjustmentValue,
@@ -32,6 +38,7 @@ import {
 } from '../utils/adjustments'
 import { clearDiskCacheUrl } from './VideoLayerRenderer'
 import EffectsStack from './effects/EffectsStack'
+import ColorWheels from './ColorWheels'
 import { isManagedEffectType } from '../utils/effects'
 import { FRAME_RATE, TRANSITION_TYPES, TRANSITION_DEFAULT_SETTINGS } from '../constants/transitions'
 
@@ -72,8 +79,22 @@ import { DEFAULT_LINE_THICKNESS, DEFAULT_POLYGON_SIDES, DEFAULT_SHAPE_PROPERTIES
 
 const TRANSITION_DEFAULT_DURATION_KEY = 'vidwright-transition-default-duration-frames'
 const INSPECTOR_EXPANDED_SECTIONS_KEY = 'vidwright-inspector-expanded-sections-v1'
+const INSPECTOR_ACTIVE_TAB_KEY = 'vidwright-inspector-active-tab-v1'
 const INSPECTOR_EXPANDED_ADJUSTMENT_GROUPS_KEY = 'vidwright-inspector-expanded-adjustment-groups-v1'
-const DEFAULT_INSPECTOR_EXPANDED_SECTIONS = ['clipInfo', 'transform', 'compositing', 'crop', 'timing', 'effects', 'text', 'style', 'shape', 'animation', 'adjustments', 'commit']
+const DEFAULT_INSPECTOR_EXPANDED_SECTIONS = ['clipInfo', 'transform', 'compositing', 'crop', 'mask', 'timing', 'effects', 'text', 'style', 'shape', 'animation', 'adjustments', 'commit']
+
+// Per-tab identity hues; inactive labels tint 42% toward the hue (see
+// .inspector-tab-tinted in index.css), the active tab goes full, dots inherit.
+const INSPECTOR_TAB_HUES = {
+  shape: '#45C4D6',
+  transform: '#6C9BF0',
+  mask: '#45C4D6',
+  color: '#E778B8',
+  effects: '#A07BE8',
+  motion: '#62C482',
+  mix: '#E09A57',
+  text: '#E8837A',
+}
 const DEFAULT_EXPANDED_ADJUSTMENT_GROUPS = ['global']
 const INSPECTOR_SETTINGS_SCOPE = {
   ALL: 'all',
@@ -493,7 +514,8 @@ function KeyframeButton({ clipId, property, clip, playheadPosition }) {
   )
 }
 
-function InspectorPanel({ isExpanded, onToggleExpanded }) {
+function InspectorPanel({ isExpanded, onToggleExpanded, isFullHeight = false, onToggleFullHeight, fullHeightDisabled = false }) {
+  const [clipInfoMenuOpen, setClipInfoMenuOpen] = useState(false)
   const [expandedSections, setExpandedSections] = useState(() => {
     try {
       const raw = localStorage.getItem(INSPECTOR_EXPANDED_SECTIONS_KEY)
@@ -553,6 +575,10 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     updateClipCompositeMode,
     updateClipTrackMatte,
     updateClipAdjustments,
+    updateClipShapeMask,
+    maskDrawActive,
+    setMaskDrawActive,
+    setClipBypass,
     resetClipTransform,
     updateTextProperties,
     updateShapeProperties,
@@ -1100,6 +1126,73 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     adjustmentHistorySessionClipRef.current = keepSessionOpen ? selectedClip.id : null
     return true
   }, [selectedClip, hasAdjustmentChanges, saveToHistory, updateClipAdjustments])
+
+  // Shape mask (Step 1 of vector masking): rect/ellipse/rounded on the clip,
+  // feather + invert baked into the matte raster. Slider drags share one
+  // history entry per gesture, same session pattern as transforms.
+  //
+  // While this section is open on a masked clip, the preview swaps its
+  // transform gizmo for the mask gizmo (drag to move/resize on the monitor).
+  const maskSectionOpen = expandedSections.includes('mask')
+  const maskEditEligible = Boolean(
+    maskSectionOpen
+    && selectedClip
+    && (selectedClip.type === 'video' || selectedClip.type === 'image')
+    && normalizeShapeMask(selectedClip.shapeMask)
+  )
+  useEffect(() => {
+    useTimelineStore.getState().setMaskEditActive?.(maskEditEligible)
+    return () => useTimelineStore.getState().setMaskEditActive?.(false)
+  }, [maskEditEligible])
+
+  const shapeMaskHistorySessionClipRef = useRef(null)
+  const applyShapeMaskWithHistory = useCallback((updates, keepSessionOpen = false) => {
+    if (!selectedClip) return false
+    const hasPendingSession = shapeMaskHistorySessionClipRef.current === selectedClip.id
+    if (!hasPendingSession) {
+      saveToHistory()
+    }
+    updateClipShapeMask(selectedClip.id, updates, false)
+    shapeMaskHistorySessionClipRef.current = keepSessionOpen ? selectedClip.id : null
+    return true
+  }, [selectedClip, saveToHistory, updateClipShapeMask])
+
+  // LUT library (app-level, IndexedDB) for the Look control: primed on
+  // mount, refreshed whenever an import or delete lands.
+  const [lutOptions, setLutOptions] = useState([])
+  const [lutImportError, setLutImportError] = useState('')
+  const lutFileInputRef = useRef(null)
+  useEffect(() => {
+    let cancelled = false
+    loadLutLibrary().then(() => {
+      if (!cancelled) setLutOptions(listLoadedLuts())
+    })
+    const handleChanged = () => setLutOptions(listLoadedLuts())
+    window.addEventListener(LUTS_CHANGED_EVENT, handleChanged)
+    return () => {
+      cancelled = true
+      window.removeEventListener(LUTS_CHANGED_EVENT, handleChanged)
+    }
+  }, [])
+
+  const applyLutUpdate = useCallback((lut, keepSessionOpen = false) => {
+    setLutImportError('')
+    applyAdjustmentUpdatesWithHistory({ lut }, keepSessionOpen)
+  }, [applyAdjustmentUpdatesWithHistory])
+
+  const handleLutFileSelected = useCallback(async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      const imported = await importCubeLutFile(file)
+      // Importing from the clip's Look row is intent to use it — apply now.
+      applyLutUpdate({ lutId: imported.id, amount: 100 })
+    } catch (err) {
+      console.warn('[lut-import] failed:', err?.message || err)
+      setLutImportError(err?.message || 'Could not import that .cube file.')
+    }
+  }, [applyLutUpdate])
   
   // Update transform handler (doesn't save to history for realtime sliders)
   // Also adds/updates keyframe if property is keyframed
@@ -1176,6 +1269,26 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     if (!selectedClip) return
     applyAdjustmentUpdatesWithHistory(buildAdjustmentUpdatePayload(key, value), false)
   }, [selectedClip, applyAdjustmentUpdatesWithHistory, buildAdjustmentUpdatePayload])
+
+  // Multi-path variant for the color wheels: one wheel gesture writes hue and
+  // saturation together, which must land as a single payload — two sequential
+  // single-path applies would each rebuild from the same base and drop one.
+  const handleClipAdjustmentPathsApply = useCallback((updates, commit = false) => {
+    if (!selectedClip || !updates || typeof updates !== 'object') return
+    let payload = baseAdjustments
+    for (const [propertyPath, value] of Object.entries(updates)) {
+      payload = setAdjustmentValue(payload, propertyPath, value)
+    }
+    const applied = applyAdjustmentUpdatesWithHistory(payload, !commit)
+    if (!applied) return
+    if (!commit) {
+      for (const [propertyPath, value] of Object.entries(updates)) {
+        if (propertyHasKeyframes(propertyPath)) {
+          setKeyframe(selectedClip.id, propertyPath, clipTime, value, 'easeInOut', { saveHistory: false })
+        }
+      }
+    }
+  }, [selectedClip, baseAdjustments, applyAdjustmentUpdatesWithHistory, propertyHasKeyframes, setKeyframe, clipTime])
 
   const handleClipAdjustmentGroupReset = useCallback((groupKey = 'all') => {
     if (!selectedClip) return false
@@ -1366,11 +1479,383 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     )
   }
 
+  // Mask section (video/image clips): always visible so the capability
+  // advertises itself; controls appear once a shape is chosen. Feather and
+  // invert bake into the matte, so preview and export match by construction.
+  // Resolve-style A/B toggle: mutes a whole group in preview AND export
+  // without losing its settings (clip.bypass via utils/clipBypass.js).
+  const renderBypassPill = (group, what) => {
+    if (!selectedClip) return null
+    const bypassed = isClipBypassed(selectedClip, group)
+    return (
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation()
+          setClipBypass(selectedClip.id, group, !bypassed)
+        }}
+        className={`px-1.5 py-0.5 rounded-full border text-[9px] font-medium transition-colors ${
+          bypassed
+            ? 'border-amber-400/70 bg-amber-400/15 text-amber-300'
+            : 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-700'
+        }`}
+        title={bypassed ? `${what} bypassed in preview and export — click to re-enable` : `Bypass ${what} without losing settings (A/B compare)`}
+      >
+        {bypassed ? 'Bypassed' : 'Bypass'}
+      </button>
+    )
+  }
+
+  const renderMaskSection = () => {
+    if (!selectedClip || (selectedClip.type !== 'video' && selectedClip.type !== 'image')) return null
+    const activeMask = normalizeShapeMask(selectedClip.shapeMask)
+    const animatedMask = activeMask
+      ? (normalizeShapeMask(getAnimatedShapeMask(selectedClip, clipTime)) || activeMask)
+      : null
+    // AI/raster masks are mask-type effects; the section is their one home
+    // now, but the data model is untouched — a shape mask still wins in the
+    // renderers, so the chips keep the two mutually exclusive.
+    const maskEffect = (selectedClip.effects || []).find((effect) => effect?.type === 'mask') || null
+    const maskValue = (key) => (animatedMask?.[key] ?? activeMask?.[key] ?? DEFAULT_SHAPE_MASK[key])
+    const applyMaskSliderValue = (key, value, keepSessionOpen = false) => {
+      applyShapeMaskWithHistory({ [key]: value }, keepSessionOpen)
+      const propertyId = `shapeMask.${key}`
+      if (propertyHasKeyframes(propertyId)) {
+        setKeyframe(selectedClip.id, propertyId, clipTime, value, 'easeInOut', { saveHistory: false })
+      }
+    }
+    const shapeChoices = [
+      { id: null, label: 'None' },
+      { id: 'rectangle', label: 'Rect' },
+      { id: 'ellipse', label: 'Ellipse' },
+      { id: 'rounded', label: 'Round' },
+      { id: 'spline', label: 'Spline' },
+      { id: 'image', label: 'Image' },
+    ]
+    const pickShape = (shapeId) => {
+      if (shapeId === 'image') {
+        if (activeMask) applyShapeMaskWithHistory(null)
+        if (maskEffect) {
+          if (maskEffect.enabled === false) toggleEffect(selectedClip.id, maskEffect.id)
+        } else {
+          setShowMaskPicker(true)
+        }
+        return
+      }
+      if (!shapeId) {
+        if (activeMask) applyShapeMaskWithHistory(null)
+        if (maskEffect && maskEffect.enabled !== false) toggleEffect(selectedClip.id, maskEffect.id)
+        setShowMaskPicker(false)
+        return
+      }
+      if (maskEffect && maskEffect.enabled !== false) toggleEffect(selectedClip.id, maskEffect.id)
+      const updates = activeMask ? { shape: shapeId } : { ...DEFAULT_SHAPE_MASK, shape: shapeId }
+      if (shapeId === 'spline' && !(selectedClip.shapeMask?.points?.length >= 3)) {
+        updates.points = DEFAULT_SPLINE_POINTS.map((p) => ({ x: p.x, y: p.y, hIn: { ...p.hIn }, hOut: { ...p.hOut } }))
+      }
+      applyShapeMaskWithHistory(updates)
+    }
+    const sliders = [
+      { key: 'centerX', label: 'Center X', min: -50, max: 150, unit: '%' },
+      { key: 'centerY', label: 'Center Y', min: -50, max: 150, unit: '%' },
+      { key: 'width', label: 'Width', min: 1, max: 200, unit: '%' },
+      { key: 'height', label: 'Height', min: 1, max: 200, unit: '%' },
+      { key: 'rotation', label: 'Rotation', min: -180, max: 180, unit: '°' },
+      ...(maskValue('shape') === 'rounded'
+        ? [{ key: 'cornerRadius', label: 'Corner Radius', min: 0, max: 100, unit: '%' }]
+        : []),
+      { key: 'feather', label: 'Feather', min: 0, max: 50, unit: '' },
+    ]
+
+    return (
+      <>
+        {renderSectionHeader('mask', 'Mask', CircleDot, (activeMask || maskEffect) ? {
+          actions: (
+            <>
+              {renderBypassPill('mask', 'The mask')}
+              {renderHeaderActionButton({
+                icon: RotateCcw,
+                label: 'Remove Mask',
+                onClick: () => {
+                  if (activeMask) applyShapeMaskWithHistory(null)
+                  if (maskEffect) removeEffect(selectedClip.id, maskEffect.id)
+                },
+                title: 'Remove the mask',
+              })}
+            </>
+          ),
+        } : {})}
+        {expandedSections.includes('mask') && (
+          <div className="p-3 space-y-3 border-b border-sf-dark-700">
+            <div className="flex gap-1.5">
+              {shapeChoices.map((choice) => {
+                const isActive = choice.id === 'image'
+                  ? (!activeMask && !!maskEffect)
+                  : choice.id === null
+                    ? (!activeMask && !maskEffect)
+                    : choice.id === (activeMask?.shape ?? undefined)
+                return (
+                  <button
+                    key={choice.label}
+                    type="button"
+                    onClick={() => pickShape(choice.id)}
+                    className={`flex-1 rounded border px-1 py-1.5 text-[10px] transition-colors ${
+                      isActive
+                        ? 'border-sf-accent bg-sf-accent/15 text-sf-accent'
+                        : 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted hover:bg-sf-dark-700'
+                    }`}
+                  >
+                    {choice.label}
+                  </button>
+                )
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => setMaskDrawActive(!maskDrawActive)}
+              className={`w-full rounded border px-2 py-1.5 text-[10px] transition-colors flex items-center justify-center gap-1.5 ${
+                maskDrawActive
+                  ? 'border-sf-accent bg-sf-accent/15 text-sf-accent'
+                  : 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted hover:bg-sf-dark-700'
+              }`}
+              title="Draw a spline on the monitor: click to add points, drag for curves, click the first point or press Enter to close, Esc cancels"
+            >
+              <PenTool className="w-3 h-3" />
+              {maskDrawActive
+                ? 'Drawing — click points on the monitor…'
+                : (activeMask ? 'Draw New Spline' : 'Draw a Spline (pen)')}
+            </button>
+            {!activeMask && !maskEffect && !showMaskPicker && (
+              <p className="text-[10px] text-sf-text-muted">
+                Pick a shape to cut this clip out, draw one point by point, or use an AI mask image. Soften shapes with Feather, flip with Invert.
+              </p>
+            )}
+            {!activeMask && (maskEffect || showMaskPicker) && (
+              <div className="space-y-2">
+                {maskEffect && (() => {
+                  const maskAsset = getAssetById(maskEffect.maskAssetId)
+                  return (
+                    <div className="flex items-center gap-2 p-2 bg-sf-dark-900 rounded">
+                      <Wand2 className="w-3.5 h-3.5 text-purple-400" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] text-sf-text-primary truncate">{maskAsset?.name || 'Mask asset not found'}</p>
+                        <p className="text-[9px] text-sf-text-muted">
+                          {maskAsset
+                            ? (maskAsset.frameCount > 1 ? `${maskAsset.frameCount} frames` : 'Single frame')
+                            : 'Relink or pick another mask image'}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => toggleEffect(selectedClip.id, maskEffect.id)}
+                        className={`p-1 rounded transition-colors ${maskEffect.enabled !== false ? 'text-purple-400' : 'text-sf-text-muted'}`}
+                        title={maskEffect.enabled !== false ? 'Bypass the image mask' : 'Enable the image mask'}
+                      >
+                        {maskEffect.enabled !== false ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                      </button>
+                    </div>
+                  )
+                })()}
+                {maskEffect && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-sf-text-secondary">Invert (cut a hole instead)</span>
+                    <button
+                      onClick={() => updateEffect(selectedClip.id, maskEffect.id, { invertMask: !maskEffect.invertMask }, true)}
+                      className={`w-8 h-4 rounded-full transition-colors ${maskEffect.invertMask ? 'bg-purple-500' : 'bg-sf-dark-600'}`}
+                    >
+                      <div className={`w-3 h-3 rounded-full bg-white transition-transform ${maskEffect.invertMask ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+                )}
+                {availableMasks.length > 0 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowMaskPicker(!showMaskPicker)}
+                      className="w-full flex items-center justify-center gap-2 py-1.5 border border-dashed border-purple-500/50 rounded text-[10px] text-purple-400 hover:border-purple-500 hover:bg-purple-500/10 transition-colors"
+                    >
+                      <Wand2 className="w-3 h-3" />
+                      {maskEffect ? 'Swap Mask Image' : 'Pick a Mask Image'}
+                    </button>
+                    {showMaskPicker && (
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-sf-dark-800 border border-sf-dark-600 rounded-lg shadow-xl z-10 max-h-48 overflow-auto">
+                        {availableMasks.map((mask) => (
+                          <button
+                            key={mask.id}
+                            onClick={() => {
+                              if (maskEffect) {
+                                updateEffect(selectedClip.id, maskEffect.id, { maskAssetId: mask.id }, true)
+                              } else {
+                                addMaskEffect(selectedClip.id, mask.id)
+                              }
+                              setShowMaskPicker(false)
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 transition-colors"
+                          >
+                            <Layers className="w-3.5 h-3.5 text-purple-400" />
+                            <div className="flex-1 min-w-0">
+                              <p className="truncate">{mask.name}</p>
+                              <p className="text-[9px] text-sf-text-muted">{mask.prompt ? `"${mask.prompt}"` : 'No prompt'}</p>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {availableMasks.length === 0 && !maskEffect && (
+                  <p className="text-[10px] text-sf-text-muted">
+                    No mask images yet — generate one with AI segmentation from the Assets panel.
+                  </p>
+                )}
+              </div>
+            )}
+            {activeMask && (
+              <>
+                {activeMask.shape === 'spline' && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] text-sf-text-muted">Shape (animate the drawn points)</span>
+                    <KeyframeButton
+                      clipId={selectedClip?.id}
+                      property="shapeMask.points"
+                      clip={selectedClip}
+                      playheadPosition={playheadPosition}
+                    />
+                  </div>
+                )}
+                {sliders.map((slider) => (
+                  <div key={slider.key}>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="text-[9px] text-sf-text-muted">{slider.label}</label>
+                      <div className="flex items-center gap-1">
+                        <KeyframeButton
+                          clipId={selectedClip?.id}
+                          property={`shapeMask.${slider.key}`}
+                          clip={selectedClip}
+                          playheadPosition={playheadPosition}
+                        />
+                        <span className="text-[9px] text-sf-text-secondary">
+                          {Math.round(maskValue(slider.key))}{slider.unit}
+                        </span>
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={slider.min}
+                      max={slider.max}
+                      step={1}
+                      value={maskValue(slider.key)}
+                      onChange={(e) => applyMaskSliderValue(slider.key, Number(e.target.value), true)}
+                      onMouseUp={(e) => applyMaskSliderValue(slider.key, Number(e.target.value))}
+                      onDoubleClick={() => applyMaskSliderValue(slider.key, DEFAULT_SHAPE_MASK[slider.key])}
+                      title={`Double-click to reset to ${DEFAULT_SHAPE_MASK[slider.key]}${slider.unit}`}
+                      className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
+                    />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-[10px] text-sf-text-muted">Invert (cut a hole instead)</span>
+                  <button
+                    type="button"
+                    onClick={() => applyShapeMaskWithHistory({ invert: !maskValue('invert') })}
+                    className={`px-2 py-1 rounded border text-[10px] transition-colors ${
+                      maskValue('invert')
+                        ? 'border-sf-accent bg-sf-accent/15 text-sf-accent'
+                        : 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted hover:bg-sf-dark-700'
+                    }`}
+                  >
+                    {maskValue('invert') ? 'Inverted' : 'Normal'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </>
+    )
+  }
+
+  // Look (3D LUT): last stage of the grade — correct with the groups above,
+  // then apply the look. LUTs come from the app-level library (import a
+  // .cube once, use it in every project).
+  const renderLutControl = (values) => {
+    const currentLut = values?.lut || null
+    const currentLutId = currentLut?.lutId || ''
+    const currentAmount = Number.isFinite(Number(currentLut?.amount)) ? Number(currentLut.amount) : 100
+    const lutIsMissing = Boolean(currentLutId) && !lutOptions.some((option) => option.id === currentLutId)
+
+    return (
+      <div className="rounded-md border border-sf-dark-700 bg-sf-dark-800/50 p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-sf-text-primary">Look (LUT)</div>
+            <div className="text-[10px] text-sf-text-muted">Applied after color and tonal controls</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => lutFileInputRef.current?.click()}
+            className="shrink-0 rounded border border-sf-dark-600 bg-sf-dark-900 px-2 py-1 text-[10px] text-sf-text-primary hover:bg-sf-dark-700"
+            title="Import a .cube 3D LUT into the app library"
+          >
+            Import .cube…
+          </button>
+          <input
+            ref={lutFileInputRef}
+            type="file"
+            accept=".cube"
+            className="hidden"
+            onChange={handleLutFileSelected}
+          />
+        </div>
+        <select
+          value={lutIsMissing ? '' : currentLutId}
+          onChange={(e) => {
+            const id = e.target.value
+            applyLutUpdate(id ? { lutId: id, amount: currentAmount } : null)
+          }}
+          className="w-full rounded border border-sf-dark-600 bg-sf-dark-900 px-2 py-1.5 text-[11px] text-sf-text-primary"
+        >
+          <option value="">None</option>
+          {lutOptions.map((option) => (
+            <option key={option.id} value={option.id}>{option.name}</option>
+          ))}
+        </select>
+        {lutIsMissing && (
+          <p className="text-[10px] text-sf-error">
+            This clip references a LUT that is not in this machine's library — it renders without it. Pick another or re-import the .cube.
+          </p>
+        )}
+        {lutImportError && (
+          <p className="text-[10px] text-sf-error">{lutImportError}</p>
+        )}
+        {currentLutId && !lutIsMissing && (
+          <div>
+            <div className="flex justify-between items-center mb-1">
+              <label className="text-[10px] text-sf-text-muted">Intensity</label>
+              <span className="text-[10px] text-sf-text-secondary">{Math.round(currentAmount)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={currentAmount}
+              onChange={(e) => applyLutUpdate({ lutId: currentLutId, amount: Number(e.target.value) }, true)}
+              onMouseUp={(e) => applyLutUpdate({ lutId: currentLutId, amount: Number(e.target.value) })}
+              onDoubleClick={() => applyLutUpdate({ lutId: currentLutId, amount: 100 })}
+              title="Double-click to reset to 100%"
+              className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const renderSharedAdjustmentsContent = (values, description) => (
     <div className="p-3 space-y-3 border-b border-sf-dark-700">
       <p className="text-[10px] text-sf-text-muted">
         {description}
       </p>
+      <ColorWheels values={values} onApply={handleClipAdjustmentPathsApply} />
       {renderAdjustmentGroup({
         title: 'Global',
         values,
@@ -1380,6 +1865,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
         values,
         groupKey,
       }))}
+      {renderLutControl(values)}
     </div>
   )
 
@@ -1998,6 +2484,79 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
         {renderSectionHeader('compositing', 'Compositing', Layers)}
         {expandedSections.includes('compositing') && (
           <div className="p-3 space-y-3 border-b border-sf-dark-700">
+            {/* Opacity */}
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-[10px] text-sf-text-muted flex items-center gap-1">
+                  <Eye className="w-3 h-3" /> Opacity
+                </label>
+                <div className="flex items-center gap-1">
+                  <KeyframeButton
+                    clipId={selectedClip?.id}
+                    property="opacity"
+                    clip={selectedClip}
+                    playheadPosition={playheadPosition}
+                  />
+                  <span className="text-[10px] text-sf-text-secondary">{Math.round(animatedTransform?.opacity ?? transform.opacity)}%</span>
+                </div>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={animatedTransform?.opacity ?? transform.opacity}
+                onChange={(e) => handleTransformChange('opacity', parseInt(e.target.value))}
+                onMouseUp={(e) => handleTransformCommit('opacity', parseInt(e.target.value))}
+                onDoubleClick={() => handleSliderReset('opacity', 100)}
+                title="Double-click to reset to 100%"
+                className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
+              />
+            </div>
+
+            {/* Blend Mode (visual clips only) */}
+            {(selectedClip?.type === 'video' || selectedClip?.type === 'image' || selectedClip?.type === 'text' || selectedClip?.type === 'shape') && (
+              <div>
+                <label className="text-[10px] text-sf-text-muted block mb-1">
+                  Blend Mode
+                </label>
+                <select
+                  value={transform.blendMode ?? 'normal'}
+                  onChange={(e) => {
+                    handleTransformChange('blendMode', e.target.value)
+                    handleTransformCommit('blendMode', e.target.value)
+                  }}
+                  className="w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                >
+                  {BLEND_MODES.map(({ value, label }) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Track Matte (visual clips only) */}
+            {(selectedClip?.type === 'video' || selectedClip?.type === 'image' || selectedClip?.type === 'text' || selectedClip?.type === 'shape') && (
+              <div>
+                <label className="text-[10px] text-sf-text-muted block mb-1">
+                  Track Matte
+                </label>
+                <select
+                  value={normalizeTrackMatte(selectedClip?.trackMatte)}
+                  onChange={(e) => updateClipTrackMatte(selectedClip.id, e.target.value)}
+                  className="w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                >
+                  {TRACK_MATTE_OPTIONS.map(({ value, label }) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                {normalizeTrackMatte(selectedClip?.trackMatte) !== 'none' && (
+                  <p className="text-[9px] text-sf-text-muted mt-1">
+                    Uses the clip on the layer directly above as the matte. That layer is hidden from output.
+                  </p>
+                )}
+              </div>
+            )}
+
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">
@@ -2544,10 +3103,104 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
   }
 
   // Render Video Clip Inspector (with 2D transforms)
+  // ---- Inspector tabs (reorg Stage A) -----------------------------------
+  // Task tabs cap how much any one view shows; gold dots mark tabs holding
+  // non-default values so edits are visible without opening anything.
+  // Section bodies are unmoved — tabs only gate which ones render.
+  const [activeInspectorTabByKind, setActiveInspectorTabByKind] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(INSPECTOR_ACTIVE_TAB_KEY)) || {}
+    } catch (_) {
+      return {}
+    }
+  })
+  const inspectorTabKind = selectedClip?.type || 'none'
+  const setActiveInspectorTab = useCallback((tabId) => {
+    setActiveInspectorTabByKind((prev) => {
+      const next = { ...prev, [inspectorTabKind]: tabId }
+      try {
+        localStorage.setItem(INSPECTOR_ACTIVE_TAB_KEY, JSON.stringify(next))
+      } catch (_) { /* ignore */ }
+      return next
+    })
+  }, [inspectorTabKind])
+  const resolveActiveInspectorTab = (tabs) => {
+    const stored = activeInspectorTabByKind[inspectorTabKind]
+    return tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id
+  }
+
+  const renderInspectorTabBar = (tabs, activeTabId) => (
+    <div className="sticky top-[42px] z-20 flex border-b border-sf-dark-700 bg-sf-dark-800">
+      {tabs.map((tab) => {
+        const isActive = tab.id === activeTabId
+        const hue = INSPECTOR_TAB_HUES[tab.id] ?? 'rgb(var(--sf-accent))'
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveInspectorTab(tab.id)}
+            title={tab.title || tab.label}
+            style={isActive
+              ? {
+                '--tab-hue': hue,
+                color: hue,
+                backgroundColor: `color-mix(in srgb, ${hue} 10%, transparent)`,
+                boxShadow: `inset 0 -2px 0 0 ${hue}`,
+              }
+              : { '--tab-hue': hue }}
+            className={`relative flex-1 min-w-0 px-0.5 py-1.5 text-[10px] transition-colors border-r border-sf-dark-700 last:border-r-0 ${
+              isActive ? '' : 'inspector-tab-tinted hover:bg-sf-dark-700/60'
+            }`}
+          >
+            <span className={tab.bypassed ? 'line-through opacity-50' : undefined}>{tab.label}</span>
+            {tab.dot && (
+              <span
+                className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full"
+                style={{ backgroundColor: 'var(--tab-hue)' }}
+                title="Has non-default settings"
+              />
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
+
+  // Non-default detection per tab. Cheap comparisons against known defaults;
+  // anything more exotic (keyframes on a property) also counts because the
+  // animated values drift from defaults while the playhead moves.
+  const transformHasEdits = (t) => {
+    if (!t) return false
+    const near = (value, def) => Math.abs((Number(value) ?? def) - def) > 0.001
+    return near(t.positionX, 0) || near(t.positionY, 0) || near(t.positionZ, 0)
+      || near(t.scaleX, 100) || near(t.scaleY, 100)
+      || near(t.rotation, 0) || near(t.rotationX, 0) || near(t.rotationY, 0)
+      || !!t.flipH || !!t.flipV
+      || near(t.cropTop, 0) || near(t.cropBottom, 0) || near(t.cropLeft, 0) || near(t.cropRight, 0)
+      || !!t.cornerPinEnabled
+  }
+  const mixHasEdits = (t, clip) => {
+    if (!t && !clip) return false
+    const opacity = Number(t?.opacity)
+    return (Number.isFinite(opacity) && Math.abs(opacity - 100) > 0.001)
+      || (t?.blendMode && t.blendMode !== 'normal')
+      || !!normalizeTrackMatte(clip?.trackMatte)?.enabled
+  }
+  const colorHasEdits = (settings) => hasAdjustmentGroupEffect(settings)
+    || hasTonalAdjustmentEffect(settings)
+    || hasLutEffect(settings)
+  const effectsHaveEdits = (clip, settings) => (Number(settings?.blur) || 0) > 0
+    || clip?.transform?.motionBlurEnabled === true
+    || (clip?.effects || []).some((effect) => effect?.enabled && effect.type !== 'mask')
+  const motionHasEdits = (clip) => (Number(clip?.speed) || 1) !== 1 || !!clip?.reverse
+  const maskHasEdits = (clip) => !!normalizeShapeMask(clip?.shapeMask)
+    || (clip?.effects || []).some((effect) => effect?.enabled && effect.type === 'mask')
+
   const renderVideoClipInspector = () => {
     if (!selectedClip || !transform) return null
     const isShapeInspector = selectedClip.type === 'shape'
     const isImageInspector = selectedClip.type === 'image'
+    const isCaptionsInspector = selectedClip.type === 'captions'
     const summaryTitle = selectedClip.name || (isShapeInspector ? 'Shape Clip' : (isImageInspector ? 'Image Clip' : 'Video Clip'))
     const summarySubtitle = `${selectedTrack?.name || 'Unknown Track'} - ${isShapeInspector ? 'Shape clip' : (isImageInspector ? 'Image clip' : 'Video clip')}`
     const SummaryIcon = isShapeInspector ? Square : (isImageInspector ? FileImage : FileVideo)
@@ -2556,6 +3209,20 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     const typeBadgeClassName = isShapeInspector
       ? 'bg-cyan-500/15 text-cyan-300'
       : (isImageInspector ? 'bg-emerald-500/15 text-emerald-300' : 'bg-blue-500/15 text-blue-300')
+
+    const dotSettings = animatedAdjustments || baseAdjustments || {}
+    const dotTransform = animatedTransform || transform || {}
+    const videoTabs = [
+      ...(isShapeInspector ? [{ id: 'shape', label: 'Shape', title: 'Shape geometry and fill' }] : []),
+      { id: 'transform', label: 'Transform', title: 'Position, scale, rotation, crop', dot: transformHasEdits(dotTransform) },
+      ...(!isShapeInspector ? [{ id: 'mask', label: 'Mask', title: 'Shape and image masks', dot: maskHasEdits(selectedClip), bypassed: isClipBypassed(selectedClip, 'mask') }] : []),
+      { id: 'color', label: 'Color', title: 'Grade and Look (LUT)', dot: colorHasEdits(dotSettings), bypassed: isClipBypassed(selectedClip, 'color') },
+      { id: 'effects', label: 'Effects', title: 'Blur and GLSL effects', dot: effectsHaveEdits(selectedClip, dotSettings), bypassed: isClipBypassed(selectedClip, 'effects') },
+      { id: 'motion', label: 'Motion', title: 'Speed, reverse, duration', dot: motionHasEdits(selectedClip) },
+      { id: 'mix', label: 'Mix', title: 'Opacity, blend, track matte', dot: mixHasEdits(dotTransform, selectedClip) },
+    ]
+    const activeTab = resolveActiveInspectorTab(videoTabs)
+    const showTab = (id) => activeTab === id
 
     return (
       <>
@@ -2568,7 +3235,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
           badges: [
             {
               label: 'type',
-              value: isShapeInspector ? 'SHAPE' : (isImageInspector ? 'IMAGE' : 'VIDEO'),
+              value: isCaptionsInspector ? 'CAPTIONS' : (isShapeInspector ? 'SHAPE' : (isImageInspector ? 'IMAGE' : 'VIDEO')),
               className: typeBadgeClassName,
             },
             {
@@ -2578,8 +3245,11 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
           ],
         })}
 
-        {renderShapeControlsSection()}
+        {renderInspectorTabBar(videoTabs, activeTab)}
 
+        {showTab('shape') && renderShapeControlsSection()}
+
+        {showTab('transform') && (<>
         {/* Transform Section */}
         {renderSectionHeader('transform', 'Transform', Move, {
           actions: renderInspectorClipboardButtons({
@@ -2974,79 +3644,6 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
               </div>
             </div>
 
-            {/* Opacity */}
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <label className="text-[10px] text-sf-text-muted flex items-center gap-1">
-                  <Eye className="w-3 h-3" /> Opacity
-                </label>
-                <div className="flex items-center gap-1">
-                  <KeyframeButton 
-                    clipId={selectedClip?.id} 
-                    property="opacity" 
-                    clip={selectedClip}
-                    playheadPosition={playheadPosition}
-                  />
-                  <span className="text-[10px] text-sf-text-secondary">{Math.round(animatedTransform?.opacity ?? transform.opacity)}%</span>
-                </div>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={animatedTransform?.opacity ?? transform.opacity}
-                onChange={(e) => handleTransformChange('opacity', parseInt(e.target.value))}
-                onMouseUp={(e) => handleTransformCommit('opacity', parseInt(e.target.value))}
-                onDoubleClick={() => handleSliderReset('opacity', 100)}
-                title="Double-click to reset to 100%"
-                className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
-              />
-            </div>
-
-            {/* Blend Mode (visual clips only) */}
-            {(selectedClip?.type === 'video' || selectedClip?.type === 'image' || selectedClip?.type === 'text' || selectedClip?.type === 'shape') && (
-              <div>
-                <label className="text-[10px] text-sf-text-muted block mb-1">
-                  Blend Mode
-                </label>
-                <select
-                  value={transform.blendMode ?? 'normal'}
-                  onChange={(e) => {
-                    handleTransformChange('blendMode', e.target.value)
-                    handleTransformCommit('blendMode', e.target.value)
-                  }}
-                  className="w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
-                >
-                  {BLEND_MODES.map(({ value, label }) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {/* Track Matte (visual clips only) */}
-            {(selectedClip?.type === 'video' || selectedClip?.type === 'image' || selectedClip?.type === 'text' || selectedClip?.type === 'shape') && (
-              <div>
-                <label className="text-[10px] text-sf-text-muted block mb-1">
-                  Track Matte
-                </label>
-                <select
-                  value={normalizeTrackMatte(selectedClip?.trackMatte)}
-                  onChange={(e) => updateClipTrackMatte(selectedClip.id, e.target.value)}
-                  className="w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
-                >
-                  {TRACK_MATTE_OPTIONS.map(({ value, label }) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-                {normalizeTrackMatte(selectedClip?.trackMatte) !== 'none' && (
-                  <p className="text-[9px] text-sf-text-muted mt-1">
-                    Uses the clip on the layer directly above as the matte. That layer is hidden from output.
-                  </p>
-                )}
-              </div>
-            )}
-
             {/* Corner Pin (video/image clips, GPU compositing) */}
             {(selectedClip?.type === 'video' || selectedClip?.type === 'image') && (
               <div>
@@ -3179,9 +3776,11 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             </div>
           </div>
         )}
+        </>)}
 
-        {renderCompositingSection()}
+        {showTab('mix') && renderCompositingSection()}
 
+        {showTab('transform') && (<>
         {/* Crop Section */}
         {renderSectionHeader('crop', 'Crop', Crop, {
           actions: renderInspectorClipboardButtons({
@@ -3196,23 +3795,6 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
         })}
         {expandedSections.includes('crop') && (
           <div className="p-3 space-y-3 border-b border-sf-dark-700">
-            {/* Visual Crop Preview */}
-            <div className="relative w-full aspect-video bg-sf-dark-800 rounded overflow-hidden">
-              <div 
-                className="absolute bg-sf-dark-600 border border-sf-dark-500"
-                style={{
-                  left: `${transform.cropLeft}%`,
-                  right: `${transform.cropRight}%`,
-                  top: `${transform.cropTop}%`,
-                  bottom: `${transform.cropBottom}%`,
-                }}
-              >
-                <div className="w-full h-full flex items-center justify-center text-[9px] text-sf-text-muted">
-                  Preview
-                </div>
-              </div>
-            </div>
-
             {/* Crop Sliders */}
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -3223,7 +3805,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={transform.cropTop}
                   onChange={(e) => handleTransformChange('cropTop', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropTop', parseInt(e.target.value))}
@@ -3240,7 +3822,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={transform.cropBottom}
                   onChange={(e) => handleTransformChange('cropBottom', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropBottom', parseInt(e.target.value))}
@@ -3257,7 +3839,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={transform.cropLeft}
                   onChange={(e) => handleTransformChange('cropLeft', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropLeft', parseInt(e.target.value))}
@@ -3274,7 +3856,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={transform.cropRight}
                   onChange={(e) => handleTransformChange('cropRight', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropRight', parseInt(e.target.value))}
@@ -3287,9 +3869,13 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
 
           </div>
         )}
+        </>)}
 
-        {renderStandardClipAdjustmentsSection()}
+        {showTab('mask') && renderMaskSection()}
 
+        {showTab('color') && renderStandardClipAdjustmentsSection()}
+
+        {showTab('motion') && (<>
         {/* Timing Section */}
         {renderSectionHeader('timing', 'Timing', Clock, {
           actions: renderInspectorClipboardButtons({
@@ -3453,9 +4039,11 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             </div>
           </div>
         )}
+        </>)}
 
+        {showTab('effects') && (<>
         {/* Effects Section */}
-        {renderSectionHeader('effects', 'Effects', Zap)}
+        {renderSectionHeader('effects', 'Effects', Zap, { actions: renderBypassPill('effects', 'All effects') })}
         {expandedSections.includes('effects') && (
           <div className="p-3 space-y-2 border-b border-sf-dark-700">
             {renderAdjustmentBlurControl('Applies blur as an effect on this clip.')}
@@ -3476,8 +4064,9 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
               goToPrevKeyframe={goToPrevKeyframe}
             />
 
-            {/* Render mask effects inline (managed effects handled by EffectsStack above) */}
-            {(selectedClip.effects || []).filter((e) => !isManagedEffectType(e?.type)).map((effect, index) => (
+            {/* Non-managed effects inline (managed effects handled by EffectsStack
+                above; mask effects live in the Mask section now) */}
+            {(selectedClip.effects || []).filter((e) => !isManagedEffectType(e?.type) && e?.type !== 'mask').map((effect, index) => (
               <div key={effect.id} className="bg-sf-dark-800 rounded overflow-hidden">
                 {/* Effect Header */}
                 <div className="flex items-center gap-2 px-2 py-1.5 bg-sf-dark-700">
@@ -3502,58 +4091,6 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                   </button>
                 </div>
                 
-                {/* Mask Effect Controls */}
-                {effect.type === 'mask' && effect.enabled && (
-                  <div className="p-2 space-y-2">
-                    {/* Mask Asset Info */}
-                    {(() => {
-                      const maskAsset = getAssetById(effect.maskAssetId)
-                      return maskAsset ? (
-                        <div className="flex items-center gap-2 p-2 bg-sf-dark-900 rounded">
-                          <Wand2 className="w-3.5 h-3.5 text-purple-400" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-[10px] text-sf-text-primary truncate">{maskAsset.name}</p>
-                            <p className="text-[9px] text-sf-text-muted">
-                              {maskAsset.frameCount > 1 ? `${maskAsset.frameCount} frames` : 'Single frame'}
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="text-[10px] text-sf-text-muted p-2 bg-sf-dark-900 rounded">
-                          Mask asset not found
-                        </div>
-                      )
-                    })()}
-                    
-                    {/* Invert Toggle */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-sf-text-secondary">Invert Mask</span>
-                      <button
-                        onClick={() => updateEffect(selectedClip.id, effect.id, { invertMask: !effect.invertMask }, true)}
-                        className={`w-8 h-4 rounded-full transition-colors ${
-                          effect.invertMask ? 'bg-purple-500' : 'bg-sf-dark-600'
-                        }`}
-                      >
-                        <div className={`w-3 h-3 rounded-full bg-white transition-transform ${
-                          effect.invertMask ? 'translate-x-4' : 'translate-x-0.5'
-                        }`} />
-                      </button>
-                    </div>
-                    
-                    {/* Feather (future implementation) */}
-                    {/* <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-sf-text-secondary">Feather</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="20"
-                        value={effect.feather || 0}
-                        onChange={(e) => updateEffect(selectedClip.id, effect.id, { feather: parseInt(e.target.value) })}
-                        className="w-20 h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-purple-500"
-                      />
-                    </div> */}
-                  </div>
-                )}
               </div>
             ))}
             
@@ -3649,59 +4186,9 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
               </div>
             )}
             
-            {/* Add Mask Effect Button */}
-            {availableMasks.length > 0 && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowMaskPicker(!showMaskPicker)}
-                  className="w-full flex items-center justify-center gap-2 py-2 border border-dashed border-purple-500/50 rounded text-xs text-purple-400 hover:border-purple-500 hover:bg-purple-500/10 transition-colors"
-                >
-                  <Wand2 className="w-3 h-3" />
-                  Add Mask Effect
-                </button>
-                
-                {/* Mask Picker Dropdown */}
-                {showMaskPicker && (
-                  <div className="absolute top-full left-0 right-0 mt-1 bg-sf-dark-800 border border-sf-dark-600 rounded-lg shadow-xl z-10 max-h-48 overflow-auto">
-                    <div className="p-2 border-b border-sf-dark-600">
-                      <span className="text-[10px] text-sf-text-muted uppercase tracking-wider">Select Mask</span>
-                    </div>
-                    {availableMasks.map(mask => (
-                      <button
-                        key={mask.id}
-                        onClick={() => {
-                          addMaskEffect(selectedClip.id, mask.id)
-                          setShowMaskPicker(false)
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 transition-colors"
-                      >
-                        <Layers className="w-3.5 h-3.5 text-purple-400" />
-                        <div className="flex-1 min-w-0">
-                          <p className="truncate">{mask.name}</p>
-                          <p className="text-[9px] text-sf-text-muted">
-                            {mask.prompt ? `"${mask.prompt}"` : 'No prompt'}
-                          </p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            
-            {/* No masks available message */}
-            {availableMasks.length === 0 && (selectedClip.effects || []).filter((e) => !isManagedEffectType(e?.type)).length === 0 && (
-              <div className="text-center py-3">
-                <Wand2 className="w-6 h-6 text-sf-text-muted mx-auto mb-2 opacity-50" />
-                <p className="text-[10px] text-sf-text-muted">No mask effects applied</p>
-                <p className="text-[9px] text-sf-text-muted mt-1">
-                  Generate masks from the Assets panel
-                </p>
-              </div>
-            )}
-            
           </div>
         )}
+        </>)}
       </>
     )
   }
@@ -3757,6 +4244,16 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
           : null
     const commitDisabled = commitRenderState.busy || !!commitDisabledReason
 
+    const adjDotTransform = animatedTransform || transform || {}
+    const adjTabs = [
+      { id: 'color', label: 'Color', title: 'Grade and Look for the layers below', dot: colorHasEdits(adjustments || {}), bypassed: isClipBypassed(selectedClip, 'color') },
+      { id: 'effects', label: 'Effects', title: 'Blur and GLSL effects for the layers below', dot: effectsHaveEdits(selectedClip, adjustments || {}), bypassed: isClipBypassed(selectedClip, 'effects') },
+      { id: 'transform', label: 'Transform', title: 'Transform the stage copy', dot: transformHasEdits(adjDotTransform) },
+      { id: 'motion', label: 'Motion', title: 'Timing', dot: motionHasEdits(selectedClip) },
+    ]
+    const activeAdjTab = resolveActiveInspectorTab(adjTabs)
+    const showAdjTab = (id) => activeAdjTab === id
+
     return (
       <>
         {renderClipSummaryHeader({
@@ -3778,6 +4275,9 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
           ],
         })}
 
+        {renderInspectorTabBar(adjTabs, activeAdjTab)}
+
+        {showAdjTab('transform') && (<>
         {renderSectionHeader('transform', 'Transform', Move, {
           actions: renderInspectorClipboardButtons({
             scope: INSPECTOR_SETTINGS_SCOPE.TRANSFORM,
@@ -4070,22 +4570,6 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
         })}
         {expandedSections.includes('crop') && (
           <div className="p-3 space-y-3 border-b border-sf-dark-700">
-            <div className="relative w-full aspect-video bg-sf-dark-800 rounded overflow-hidden">
-              <div
-                className="absolute bg-sf-dark-600 border border-sf-dark-500"
-                style={{
-                  left: `${animatedTransform?.cropLeft ?? transform.cropLeft}%`,
-                  right: `${animatedTransform?.cropRight ?? transform.cropRight}%`,
-                  top: `${animatedTransform?.cropTop ?? transform.cropTop}%`,
-                  bottom: `${animatedTransform?.cropBottom ?? transform.cropBottom}%`,
-                }}
-              >
-                <div className="w-full h-full flex items-center justify-center text-[9px] text-sf-text-muted">
-                  Preview
-                </div>
-              </div>
-            </div>
-
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <div className="flex justify-between items-center mb-1">
@@ -4103,7 +4587,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={animatedTransform?.cropTop ?? transform.cropTop}
                   onChange={(e) => handleTransformChange('cropTop', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropTop', parseInt(e.target.value))}
@@ -4128,7 +4612,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={animatedTransform?.cropBottom ?? transform.cropBottom}
                   onChange={(e) => handleTransformChange('cropBottom', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropBottom', parseInt(e.target.value))}
@@ -4153,7 +4637,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={animatedTransform?.cropLeft ?? transform.cropLeft}
                   onChange={(e) => handleTransformChange('cropLeft', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropLeft', parseInt(e.target.value))}
@@ -4178,7 +4662,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <input
                   type="range"
                   min="0"
-                  max="50"
+                  max="100"
                   value={animatedTransform?.cropRight ?? transform.cropRight}
                   onChange={(e) => handleTransformChange('cropRight', parseInt(e.target.value))}
                   onMouseUp={(e) => handleTransformCommit('cropRight', parseInt(e.target.value))}
@@ -4191,8 +4675,10 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
 
           </div>
         )}
+        </>)}
 
-        {renderSectionHeader('effects', 'Effects', Zap)}
+        {showAdjTab('effects') && (<>
+        {renderSectionHeader('effects', 'Effects', Zap, { actions: renderBypassPill('effects', 'All effects') })}
         {expandedSections.includes('effects') && (
           <div className="p-3 space-y-2 border-b border-sf-dark-700">
             {renderAdjustmentBlurControl('Applies blur as an effect on the clips below this layer.')}
@@ -4213,22 +4699,31 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             />
           </div>
         )}
+        </>)}
 
+        {showAdjTab('color') && (<>
         {renderSectionHeader('adjustments', 'Color', Sparkles, {
           actions: renderInspectorClipboardButtons({
             scope: INSPECTOR_SETTINGS_SCOPE.ADJUSTMENTS,
-            extraActions: renderHeaderActionButton({
-              icon: RotateCcw,
-              label: 'Reset',
-              onClick: handleClipAdjustmentsReset,
-              title: 'Reset color controls',
-            }),
+            extraActions: (
+              <>
+                {renderBypassPill('color', 'The grade and LUT')}
+                {renderHeaderActionButton({
+                  icon: RotateCcw,
+                  label: 'Reset',
+                  onClick: handleClipAdjustmentsReset,
+                  title: 'Reset color controls',
+                })}
+              </>
+            ),
           }),
         })}
         {expandedSections.includes('adjustments') && (
           renderSharedAdjustmentsContent(adjustments, 'Applies color controls to clips below this layer.')
         )}
+        </>)}
 
+        {showAdjTab('motion') && (<>
         {renderSectionHeader('timing', 'Timing', Clock, {
           actions: renderInspectorClipboardButtons({
             scope: INSPECTOR_SETTINGS_SCOPE.TIMING,
@@ -4278,6 +4773,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             </div>
           </div>
         )}
+        </>)}
 
         {renderSectionHeader('commit', 'Commit Render', HardDrive)}
         {expandedSections.includes('commit') && (
@@ -4342,12 +4838,17 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
       {renderSectionHeader('adjustments', 'Color', Sparkles, {
         actions: renderInspectorClipboardButtons({
           scope: INSPECTOR_SETTINGS_SCOPE.ADJUSTMENTS,
-          extraActions: renderHeaderActionButton({
-            icon: RotateCcw,
-            label: 'Reset',
-            onClick: handleClipAdjustmentsReset,
-            title: 'Reset color controls',
-          }),
+          extraActions: (
+            <>
+              {renderBypassPill('color', 'The grade and LUT')}
+              {renderHeaderActionButton({
+                icon: RotateCcw,
+                label: 'Reset',
+                onClick: handleClipAdjustmentsReset,
+                title: 'Reset color controls',
+              })}
+            </>
+          ),
         }),
       })}
       {expandedSections.includes('adjustments') && (
@@ -4467,7 +4968,19 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     const textProps = getTextProps()
     if (!textProps) return null
     const activeAnimationPresetId = selectedClip?.titleAnimation?.presetId || 'none'
-    
+    const textDotSettings = animatedAdjustments || baseAdjustments || {}
+    const textDotTransform = animatedTransform || transform || {}
+    const textTabs = [
+      { id: 'text', label: 'Text', title: 'Content, style, title animation', dot: activeAnimationPresetId !== 'none' },
+      { id: 'transform', label: 'Transform', title: 'Position, scale, rotation', dot: transformHasEdits(textDotTransform) },
+      { id: 'color', label: 'Color', title: 'Grade', dot: colorHasEdits(textDotSettings), bypassed: isClipBypassed(selectedClip, 'color') },
+      { id: 'effects', label: 'Effects', title: 'Blur and GLSL effects', dot: effectsHaveEdits(selectedClip, textDotSettings), bypassed: isClipBypassed(selectedClip, 'effects') },
+      { id: 'motion', label: 'Motion', title: 'Timing', dot: motionHasEdits(selectedClip) },
+      { id: 'mix', label: 'Mix', title: 'Opacity, blend, track matte', dot: mixHasEdits(textDotTransform, selectedClip) },
+    ]
+    const activeTextTab = resolveActiveInspectorTab(textTabs)
+    const showTextTab = (id) => activeTextTab === id
+
     return (
       <>
         {renderClipSummaryHeader({
@@ -4489,6 +5002,9 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
           ],
         })}
 
+        {renderInspectorTabBar(textTabs, activeTextTab)}
+
+        {showTextTab('text') && (<>
         {/* Text Content Section */}
         {renderSectionHeader('text', 'Text Content', Type)}
         {expandedSections.includes('text') && (
@@ -4755,8 +5271,10 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             </p>
           </div>
         )}
+        </>)}
 
-        {renderSectionHeader('effects', 'Effects', Zap)}
+        {showTextTab('effects') && (<>
+        {renderSectionHeader('effects', 'Effects', Zap, { actions: renderBypassPill('effects', 'All effects') })}
         {expandedSections.includes('effects') && (
           <div className="p-3 space-y-2 border-b border-sf-dark-700">
             {renderAdjustmentBlurControl('Applies blur as an effect on this text clip.')}
@@ -4776,7 +5294,9 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             />
           </div>
         )}
+        </>)}
 
+        {showTextTab('transform') && (<>
         {/* Transform Section (shared with video) */}
         {renderSectionHeader('transform', 'Transform', Move, {
           actions: renderInspectorClipboardButtons({
@@ -4898,60 +5418,15 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
               />
             </div>
 
-            {/* Opacity */}
-            <div>
-              <div className="flex justify-between mb-1">
-                <label className="text-[10px] text-sf-text-muted flex items-center gap-1">
-                  <Eye className="w-3 h-3" /> Opacity
-                </label>
-                <div className="flex items-center gap-1">
-                  <KeyframeButton
-                    clipId={selectedClip?.id}
-                    property="opacity"
-                    clip={selectedClip}
-                    playheadPosition={playheadPosition}
-                  />
-                  <span className="text-[10px] text-sf-text-secondary">{Math.round(animatedTransform?.opacity ?? transform.opacity)}%</span>
-                </div>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={animatedTransform?.opacity ?? transform.opacity}
-                onChange={(e) => handleTransformChange('opacity', parseInt(e.target.value))}
-                onMouseUp={(e) => handleTransformCommit('opacity', parseInt(e.target.value))}
-                onDoubleClick={() => handleSliderReset('opacity', 100)}
-                title="Double-click to reset to 100%"
-                className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
-              />
-            </div>
-
-            {/* Blend Mode */}
-            <div>
-              <label className="text-[10px] text-sf-text-muted block mb-1">
-                Blend Mode
-              </label>
-              <select
-                value={transform.blendMode ?? 'normal'}
-                onChange={(e) => {
-                  handleTransformChange('blendMode', e.target.value)
-                  handleTransformCommit('blendMode', e.target.value)
-                }}
-                className="w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1.5 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
-              >
-                {BLEND_MODES.map(({ value, label }) => (
-                  <option key={value} value={value}>{label}</option>
-                ))}
-              </select>
-            </div>
           </div>
         )}
+        </>)}
 
-        {renderCompositingSection()}
+        {showTextTab('mix') && renderCompositingSection()}
 
-        {renderStandardClipAdjustmentsSection()}
+        {showTextTab('color') && renderStandardClipAdjustmentsSection()}
 
+        {showTextTab('motion') && (<>
         {/* Timing Section */}
         {renderSectionHeader('timing', 'Timing', Clock, {
           actions: renderInspectorClipboardButtons({
@@ -4995,6 +5470,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
             </div>
           </div>
         )}
+        </>)}
       </>
     )
   }
@@ -5342,55 +5818,65 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     }
 
     return (
-      <>
-        {renderSectionHeader('clipInfo', 'Clip Info', Info)}
-        {expandedSections.includes('clipInfo') && (
-          <div className="p-3 border-b border-sf-dark-700 space-y-3">
-            <div className="flex items-start gap-3">
-              <div className={`w-10 h-10 rounded-lg ${iconBgClassName} flex items-center justify-center flex-shrink-0`}>
-                <Icon className={`w-5 h-5 ${iconToneClassName}`} />
+      <div className="sticky top-0 z-30 h-[42px] px-3 flex items-center gap-2 border-b border-sf-dark-700 bg-sf-dark-800">
+        <div className={`w-6 h-6 rounded-md ${iconBgClassName} flex items-center justify-center flex-shrink-0`}>
+          <Icon className={`w-3.5 h-3.5 ${iconToneClassName}`} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[11px] leading-tight font-medium text-sf-text-primary truncate" title={title}>
+            {title}
+          </p>
+          <p className="text-[9px] leading-tight text-sf-text-muted truncate">
+            {subtitle}
+          </p>
+        </div>
+        {badges.length > 0 && (
+          <div className="flex justify-end gap-1 flex-shrink-0">
+            {badges.map((badge) => (
+              <span
+                key={`${badge.label}-${badge.value}`}
+                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[9px] font-medium ${badge.className || 'bg-sf-dark-700 text-sf-text-secondary'}`}
+              >
+                {badge.value}
+              </span>
+            ))}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => setClipInfoMenuOpen((open) => !open)}
+          title="Clip details"
+          className={`p-1 rounded flex-shrink-0 transition-colors ${
+            clipInfoMenuOpen
+              ? 'bg-sf-dark-600 text-sf-text-primary'
+              : 'text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-700'
+          }`}
+        >
+          <MoreHorizontal className="w-3.5 h-3.5" />
+        </button>
+        {clipInfoMenuOpen && (
+          <>
+            <div className="fixed inset-0 z-30" onClick={() => setClipInfoMenuOpen(false)} />
+            <div className="absolute left-2 right-2 top-full mt-1 z-40 rounded-md border border-sf-dark-600 bg-sf-dark-800 shadow-xl p-2 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                {infoItems.map((item) => (
+                  <div key={`${item.label}-${item.value}`} className="rounded border border-sf-dark-700 bg-sf-dark-900/70 px-2 py-1.5 min-w-0">
+                    <div className="text-[9px] uppercase tracking-wider text-sf-text-muted">{item.label}</div>
+                    <div className="mt-0.5 truncate text-[11px] font-medium text-sf-text-primary" title={item.value}>
+                      {item.value}
+                    </div>
+                  </div>
+                ))}
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-sf-text-primary truncate" title={title}>
-                  {title}
-                </p>
-                <p className="text-[10px] text-sf-text-muted truncate">
-                  {subtitle}
-                </p>
-              </div>
-              {badges.length > 0 && (
-                <div className="flex flex-wrap justify-end gap-1 max-w-[45%]">
-                  {badges.map((badge) => (
-                    <span
-                      key={`${badge.label}-${badge.value}`}
-                      className={`inline-flex items-center rounded px-2 py-0.5 text-[10px] font-medium ${badge.className || 'bg-sf-dark-700 text-sf-text-secondary'}`}
-                    >
-                      {badge.value}
-                    </span>
-                  ))}
+              {actions && (
+                <div className="space-y-2">
+                  {actions}
                 </div>
               )}
             </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              {infoItems.map((item) => (
-                <div key={`${item.label}-${item.value}`} className="rounded border border-sf-dark-700 bg-sf-dark-900/70 px-2 py-1.5 min-w-0">
-                  <div className="text-[9px] uppercase tracking-wider text-sf-text-muted">{item.label}</div>
-                  <div className="mt-0.5 truncate text-[11px] font-medium text-sf-text-primary" title={item.value}>
-                    {item.value}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {actions && (
-              <div className="space-y-2">
-                {actions}
-              </div>
-            )}
-          </div>
+          </>
         )}
-      </>
+      </div>
     )
   }
   
@@ -6093,8 +6579,31 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
           </button>
         </div>
         
-        {/* Collapse/Expand Button */}
+        {/* Bottom buttons */}
         <div className="border-t border-sf-dark-700">
+          {/* Full Height Toggle Button */}
+          <button
+            onClick={onToggleFullHeight}
+            disabled={fullHeightDisabled}
+            className={`w-full h-10 flex items-center justify-center transition-colors ${
+              fullHeightDisabled
+                ? 'text-sf-text-muted opacity-40 cursor-default'
+                : isFullHeight
+                  ? 'text-sf-accent bg-sf-dark-800'
+                  : 'text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-800/50'
+            }`}
+            title={fullHeightDisabled
+              ? 'Unavailable while the left panel is full height'
+              : isFullHeight ? 'Contract panel (exit full height)' : 'Expand panel (full height)'}
+          >
+            {isFullHeight ? (
+              <PanelRightClose className="w-4 h-4" />
+            ) : (
+              <PanelRight className="w-4 h-4" />
+            )}
+          </button>
+
+          {/* Collapse/Expand Button */}
           <button
             onClick={onToggleExpanded}
             className="w-full h-10 flex items-center justify-center text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-800/50 transition-colors"

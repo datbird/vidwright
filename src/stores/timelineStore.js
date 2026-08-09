@@ -6,9 +6,11 @@ import { getAdjustmentValue, mergeAdjustmentSettings, normalizeAdjustmentSetting
 import { clampAudioFadeDuration } from '../utils/audioClipFades'
 import { normalizeAudioClipGainDb } from '../utils/audioClipGain'
 import { clampTrackPan, clampTrackVolume } from '../utils/audioTrackAudibility'
+import { hasVideoSolo, isVideoTrackVisible } from '../utils/videoTrackVisibility'
 import { normalizeAudioInserts } from '../utils/audioInserts'
 import { CLIP_COMPOSITE_MODE, normalizeClipCompositeMode } from '../utils/layerCompositing'
 import { getKeyframeTimeTolerance } from '../utils/keyframes'
+import { DEFAULT_SHAPE_MASK, normalizeShapeMask } from '../utils/shapeMask'
 import { normalizeTrackMatte } from '../utils/trackMatte'
 import { DEFAULT_LINE_THICKNESS, DEFAULT_SHAPE_PROPERTIES, getShapeDisplayName, normalizeShapeProperties } from '../utils/shapes'
 import {
@@ -18,6 +20,55 @@ import {
 
 // Maximum number of undo states to keep
 const MAX_HISTORY_SIZE = 50
+
+// The persist middleware fires on EVERY store write and re-serializes the
+// whole partialized state — it cannot know which field changed. During
+// playback the playhead updates ~60x/s, which meant a JSON.stringify of the
+// full clip list plus a synchronous localStorage write per animation frame
+// (roughly the entire frame budget on a 160-clip timeline). This storage
+// queues the latest snapshot and writes it at most once per second;
+// last-write-wins, flushed on window close, so session restore loses nothing.
+const PERSIST_WRITE_DELAY_MS = 1000
+const createDebouncedJSONStorage = (getStorage) => {
+  let pending = null
+  let timer = 0
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = 0
+    }
+    if (!pending) return
+    const { name, value } = pending
+    pending = null
+    try {
+      getStorage().setItem(name, JSON.stringify(value))
+    } catch (error) {
+      console.warn('[timelineStore] persist write failed', error)
+    }
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', flush)
+  }
+  return {
+    getItem: (name) => {
+      try {
+        const raw = getStorage().getItem(name)
+        return raw == null ? null : JSON.parse(raw)
+      } catch (error) {
+        console.warn('[timelineStore] persist read failed', error)
+        return null
+      }
+    },
+    setItem: (name, value) => {
+      pending = { name, value }
+      if (!timer) timer = setTimeout(flush, PERSIST_WRITE_DELAY_MS)
+    },
+    removeItem: (name) => {
+      if (pending && pending.name === name) pending = null
+      getStorage().removeItem(name)
+    },
+  }
+}
 const MIN_TRANSITION_DURATION = 1 / FRAME_RATE
 const TRIM_DEBUG_KEY = 'vidwright-debug-trim'
 const KEYFRAME_TIME_TOLERANCE = 0.05
@@ -502,7 +553,7 @@ const getNextClipCounter = (clips = [], fallback = 1) => {
 
 const isAdjustmentClipType = (clip) => clip?.type === 'adjustment'
 const isInfinitelyExtendableClipType = (clip) => (
-  clip?.type === 'image' || clip?.type === 'adjustment' || clip?.type === 'text' || clip?.type === 'shape'
+  clip?.type === 'image' || clip?.type === 'adjustment' || clip?.type === 'text' || clip?.type === 'shape' || clip?.type === 'captions'
 )
 const supportsClipAdjustments = (clip) => (
   clip?.type === 'video'
@@ -731,6 +782,157 @@ export const useTimelineStore = create(
   
   // Ripple edit mode - when enabled, moving/trimming clips shifts subsequent clips
   rippleEditMode: false,
+
+  // Mask edit mode (transient, not persisted): true while the Inspector's
+  // Mask section is open on a masked clip, so the preview shows the mask
+  // gizmo instead of the transform gizmo.
+  maskEditActive: false,
+  setMaskEditActive: (active) => {
+    if (get().maskEditActive === !!active) return
+    set({ maskEditActive: !!active })
+  },
+  // Pen-draw mode for spline masks: the monitor becomes a click-to-place
+  // drawing surface while this is on. Transient like maskEditActive.
+  maskDrawActive: false,
+  setMaskDrawActive: (active) => {
+    if (get().maskDrawActive === !!active) return
+    set({ maskDrawActive: !!active })
+  },
+  /**
+   * Place (or replace) the live captions clip: a synthetic clip whose cues
+   * render fresh every frame in preview and export — no baked overlay video.
+   * Reuses the dedicated role:'captions' track exactly like baked overlays.
+   */
+  placeLiveCaptions: ({ cues, preset, duration, workspace = null, name = 'Captions' } = {}) => {
+    const safeCues = Array.isArray(cues) ? cues : []
+    if (safeCues.length === 0) return null
+    get().saveToHistory()
+
+    let captionsTrack = get().tracks.find((t) => t.role === 'captions')
+    if (!captionsTrack) {
+      captionsTrack = get().addTrack('video', { role: 'captions', name: 'Captions' })
+    }
+    if (!captionsTrack) return null
+
+    // One captions clip per timeline. An existing live clip survives as the
+    // carrier — its transform, grade, masks, matte, bypass and keyframes ride
+    // through a regenerate — while baked leftovers and strays clear out.
+    const before = get().clips
+    const carrier = before.find((clip) => clip.type === 'captions' && clip.trackId === captionsTrack.id)
+      || before.find((clip) => clip.type === 'captions')
+    before
+      .filter((clip) => (clip.trackId === captionsTrack.id || clip.type === 'captions') && clip.id !== carrier?.id)
+      .forEach((clip) => get().removeClip(clip.id))
+
+    const safeDuration = Math.max(
+      0.4,
+      Number(duration) || Math.max(...safeCues.map((cue) => Number(cue?.end) || 0), 1)
+    )
+    // `workspace` is the caption workspace's own controls snapshot (preset id,
+    // style controls, placement globals, word timings) — render-irrelevant,
+    // but it makes the edit round-trip lossless across restarts and machines.
+    const captionsPayload = {
+      preset: preset || null,
+      cues: safeCues,
+      ...(workspace ? { workspace } : {}),
+    }
+
+    if (carrier) {
+      set((state) => ({
+        clips: state.clips.map((clip) => (clip.id === carrier.id
+          ? {
+              ...clip,
+              trackId: captionsTrack.id,
+              startTime: 0,
+              duration: safeDuration,
+              sourceDuration: safeDuration,
+              trimStart: 0,
+              trimEnd: safeDuration,
+              captions: captionsPayload,
+            }
+          : clip)),
+        selectedClipIds: [carrier.id],
+        duration: Math.max(state.duration, safeDuration + 10),
+      }))
+      return get().clips.find((clip) => clip.id === carrier.id) || null
+    }
+
+    const current = get()
+    const safeClipCounter = getNextClipCounter(current.clips, current.clipCounter || 1)
+    const newClip = {
+      id: `clip-${safeClipCounter}`,
+      trackId: captionsTrack.id,
+      assetId: null,
+      name,
+      startTime: 0,
+      duration: safeDuration,
+      sourceDuration: safeDuration,
+      trimStart: 0,
+      trimEnd: safeDuration,
+      color: '#3E6B5C',
+      type: 'captions',
+      enabled: true,
+      compositeLowerLayers: CLIP_COMPOSITE_MODE.AUTO,
+      url: null,
+      thumbnail: null,
+      captions: captionsPayload,
+      transform: {
+        positionX: 0,
+        positionY: 0,
+        positionZ: 0,
+        scaleX: 100,
+        scaleY: 100,
+        scaleLinked: true,
+        rotation: 0,
+        rotationX: 0,
+        rotationY: 0,
+        perspective: 1200,
+        anchorX: 50,
+        anchorY: 50,
+        opacity: 100,
+        flipH: false,
+        flipV: false,
+        cropTop: 0,
+        cropBottom: 0,
+        cropLeft: 0,
+        cropRight: 0,
+        motionBlurEnabled: false,
+        motionBlurMode: 'auto',
+        motionBlurSamples: 8,
+        motionBlurShutter: 180,
+        blendMode: 'normal',
+        blur: 0,
+      },
+    }
+    set((state) => ({
+      clips: [...state.clips, newClip],
+      clipCounter: Math.max(state.clipCounter, safeClipCounter + 1),
+      selectedClipIds: [newClip.id],
+      duration: Math.max(state.duration, newClip.duration + 10),
+    }))
+    return newClip
+  },
+  /**
+   * Toggle a per-group bypass on a clip (mask | color | effects) — the
+   * Resolve-style A/B switch. Settings are untouched; renderers read the
+   * flags through utils/clipBypass.js.
+   */
+  setClipBypass: (clipId, group, bypassed) => {
+    get().saveToHistory()
+    set((state) => ({
+      clips: state.clips.map((clip) => {
+        if (clip.id !== clipId) return clip
+        const next = { ...(clip.bypass || {}) }
+        if (bypassed) next[group] = true
+        else delete next[group]
+        if (Object.keys(next).length === 0) {
+          const { bypass, ...rest } = clip
+          return rest
+        }
+        return { ...clip, bypass: next }
+      })
+    }))
+  },
   
   // In/Out points for three-point editing
   inPoint: null, // Timeline in-point (seconds)
@@ -1117,6 +1319,11 @@ export const useTimelineStore = create(
         ...(optionTransform || {}),
         blendMode: optionTransform?.blendMode ?? assetDefaultTransform?.blendMode ?? 'normal',
       },
+      // Carry an effects stack through split/duplicate — otherwise the new
+      // half/copy silently loses its GLSL effects.
+      ...(Array.isArray(options?.effects) && options.effects.length > 0
+        ? { effects: structuredClone(options.effects) }
+        : {}),
     }, fps), fps)
     
     // Resolve overlaps with existing clips on the same track (NLE overwrite behavior)
@@ -1211,6 +1418,9 @@ export const useTimelineStore = create(
       thumbnail: null,
       // Text-specific properties
       textProperties: defaultText,
+      ...(Array.isArray(textOptions?.effects) && textOptions.effects.length > 0
+        ? { effects: structuredClone(textOptions.effects) }
+        : {}),
       // Metadata for preset-based text title animation
       titleAnimation: null,
       // 2D Transform properties (same as video clips)
@@ -1311,6 +1521,9 @@ export const useTimelineStore = create(
         ...(shapeOptions.transform || {}),
         blendMode: shapeOptions.transform?.blendMode ?? 'normal',
       },
+      ...(Array.isArray(shapeOptions?.effects) && shapeOptions.effects.length > 0
+        ? { effects: structuredClone(shapeOptions.effects) }
+        : {}),
     }
 
     const { clips: updatedClips, addedCount } = get().resolveOverlaps(
@@ -1381,6 +1594,9 @@ export const useTimelineStore = create(
         ...(options?.transform || {}),
         blendMode: options?.transform?.blendMode ?? 'normal',
       },
+      ...(Array.isArray(options?.effects) && options.effects.length > 0
+        ? { effects: structuredClone(options.effects) }
+        : {}),
     }
 
     const { clips: updatedClips, addedCount } = get().resolveOverlaps(
@@ -2412,6 +2628,131 @@ export const useTimelineStore = create(
   },
 
   /**
+   * Spawn in-place copies of dragged clips for an Alt-drag duplicate gesture
+   * (Flame/Resolve style: the copies hold the gesture-start spot while the
+   * dragged originals keep following the pointer). Copies get fresh ids,
+   * re-linked link groups among themselves, cold render caches, and clones of
+   * transitions that live fully inside the duplicated set. Sync-locked clips
+   * are skipped: they snap back to their anchor instead of moving, so a copy
+   * would stack directly on its original.
+   * History-neutral: the drag gesture saves the undo checkpoint, so one undo
+   * removes the copies and returns the originals in a single step.
+   * @param {Array<string>} clipIds - Ids of the clips being dragged
+   * @param {Array<{id: string, startTime: number, trackId: string}>} originalPositions - Gesture-start position per clip
+   * @returns {{clipIds: Array<string>, transitionIds: Array<string>}|null} Created ids (for a mid-gesture cancel), or null
+   */
+  duplicateClipsForDrag: (clipIds = [], originalPositions = []) => {
+    const state = get()
+    const sourceIds = new Set(dedupeClipIds(clipIds))
+    const positionById = new Map((originalPositions || []).map((entry) => [entry.id, entry]))
+    const sources = state.clips.filter((clip) => sourceIds.has(clip.id) && !isSyncLockedClip(clip))
+    if (sources.length === 0) return null
+
+    let clipCounter = getNextClipCounter(state.clips, state.clipCounter || 1)
+    const duplicateLinkGroups = new Map()
+    const getDuplicateLinkGroupId = (sourceLinkGroupId) => {
+      const normalized = getNormalizedLinkGroupId(sourceLinkGroupId)
+      if (!normalized) return undefined
+      if (!duplicateLinkGroups.has(normalized)) {
+        duplicateLinkGroups.set(normalized, buildLinkGroupId(`dup-${clipCounter + duplicateLinkGroups.size}`))
+      }
+      return duplicateLinkGroups.get(normalized)
+    }
+
+    const idMap = new Map()
+    const duplicates = sources.map((clip) => {
+      const gestureStart = positionById.get(clip.id)
+      const duplicate = {
+        ...structuredClone(clip),
+        id: `clip-${clipCounter}`,
+        startTime: Number.isFinite(gestureStart?.startTime) ? gestureStart.startTime : clip.startTime,
+        trackId: gestureStart?.trackId || clip.trackId,
+        selected: false,
+        cacheStatus: 'none',
+        cacheProgress: 0,
+        cacheUrl: null,
+        cachePath: null,
+        linkGroupId: getDuplicateLinkGroupId(clip.linkGroupId),
+        lockMode: undefined,
+        syncLock: undefined,
+      }
+      idMap.set(clip.id, duplicate.id)
+      clipCounter += 1
+      return duplicate
+    })
+    const duplicatesById = new Map(duplicates.map((clip) => [clip.id, clip]))
+
+    // Transition records carry absolute clip-position bookkeeping; rebuild
+    // those fields from the copies so the clone is self-consistent at the
+    // gesture-start location instead of inheriting possibly-stale values.
+    let transitionCounter = state.transitionCounter || 1
+    const duplicatedTransitions = []
+    for (const transition of state.transitions) {
+      let cloned = null
+      if (transition.kind === 'between' && idMap.has(transition.clipAId) && idMap.has(transition.clipBId)) {
+        const copyA = duplicatesById.get(idMap.get(transition.clipAId))
+        const copyB = duplicatesById.get(idMap.get(transition.clipBId))
+        cloned = {
+          ...structuredClone(transition),
+          id: `transition-${transitionCounter}`,
+          clipAId: copyA.id,
+          clipBId: copyB.id,
+          editPoint: copyA.startTime + copyA.duration,
+          originalClipAEnd: copyA.startTime + copyA.duration,
+          originalClipADuration: copyA.duration,
+          originalClipATrimEnd: copyA.trimEnd,
+          originalClipBStart: copyB.startTime,
+          originalClipBDuration: copyB.duration,
+          originalClipBTrimStart: copyB.trimStart,
+        }
+      } else if (transition.kind === 'edge' && idMap.has(transition.clipId)) {
+        cloned = {
+          ...structuredClone(transition),
+          id: `transition-${transitionCounter}`,
+          clipId: idMap.get(transition.clipId),
+        }
+      }
+      if (cloned) {
+        transitionCounter += 1
+        duplicatedTransitions.push(cloned)
+      }
+    }
+
+    set((current) => ({
+      clips: [...current.clips, ...duplicates],
+      clipCounter: Math.max(current.clipCounter || 1, clipCounter),
+      ...(duplicatedTransitions.length > 0
+        ? {
+          transitions: [...current.transitions, ...duplicatedTransitions],
+          transitionCounter: Math.max(current.transitionCounter || 1, transitionCounter),
+        }
+        : {}),
+    }))
+
+    return {
+      clipIds: duplicates.map((clip) => clip.id),
+      transitionIds: duplicatedTransitions.map((transition) => transition.id),
+    }
+  },
+
+  /**
+   * Remove copies spawned by duplicateClipsForDrag when Alt is released
+   * mid-gesture. Removes exactly the given ids (no linked expansion) and is
+   * history-neutral, matching the spawn side.
+   * @param {{clipIds?: Array<string>, transitionIds?: Array<string>}} created - Ids returned by duplicateClipsForDrag
+   */
+  removeDragDuplicates: ({ clipIds = [], transitionIds = [] } = {}) => {
+    const clipIdSet = new Set(clipIds)
+    const transitionIdSet = new Set(transitionIds)
+    if (clipIdSet.size === 0 && transitionIdSet.size === 0) return
+    set((state) => ({
+      clips: state.clips.filter((clip) => !clipIdSet.has(clip.id)),
+      transitions: state.transitions.filter((transition) => !transitionIdSet.has(transition.id)),
+      selectedClipIds: state.selectedClipIds.filter((id) => !clipIdSet.has(id)),
+    }))
+  },
+
+  /**
    * Resize a clip
    */
   resizeClip: (clipId, newDuration) => {
@@ -2767,6 +3108,32 @@ export const useTimelineStore = create(
         return {
           ...clip,
           adjustments: mergeAdjustmentSettings(clip.adjustments || {}, adjustmentUpdates || {}),
+        }
+      })
+    }))
+  },
+
+  /**
+   * Set or clear a clip's parametric shape mask (rect/ellipse/rounded with
+   * feather + invert). Pass partial updates to merge, or null to remove.
+   * Video and image clips only — the types the mask compositing paths draw.
+   */
+  updateClipShapeMask: (clipId, maskUpdates, saveHistory = false) => {
+    if (saveHistory) {
+      get().saveToHistory()
+    }
+
+    set((state) => ({
+      clips: state.clips.map((clip) => {
+        if (clip.id !== clipId || (clip.type !== 'video' && clip.type !== 'image')) return clip
+        if (maskUpdates === null) {
+          if (!clip.shapeMask) return clip
+          const { shapeMask, ...rest } = clip
+          return rest
+        }
+        return {
+          ...clip,
+          shapeMask: { ...(clip.shapeMask || {}), ...(maskUpdates || {}) },
         }
       })
     }))
@@ -3147,13 +3514,22 @@ export const useTimelineStore = create(
       const hasAdjustmentValue = adjustmentValue !== undefined
       const shapeProperties = clip.type === 'shape' ? normalizeShapeProperties(clip.shapeProperties || {}) : null
       const hasShapeValue = shapeProperties && Object.prototype.hasOwnProperty.call(shapeProperties, property)
+      const maskPropertyKey = property.startsWith('shapeMask.') ? property.slice('shapeMask.'.length) : null
+      const maskForKeyframe = maskPropertyKey ? (normalizeShapeMask(clip.shapeMask) || DEFAULT_SHAPE_MASK) : null
+      // Shape keyframes snapshot the whole points array; without a spline
+      // there is nothing to key.
+      if (maskPropertyKey === 'points' && !Array.isArray(maskForKeyframe?.points)) return
       const currentValue = property === 'speed'
         ? (Number(clip.speed) > 0 ? Number(clip.speed) : 1)
-        : hasAdjustmentValue
-          ? adjustmentValue
-          : hasShapeValue
-            ? shapeProperties[property]
-            : (clip.transform?.[property] ?? adjustmentValue ?? 0)
+        : maskForKeyframe
+          ? (maskPropertyKey === 'points'
+            ? maskForKeyframe.points.map((p) => ({ x: p.x, y: p.y, hIn: { ...p.hIn }, hOut: { ...p.hOut } }))
+            : (Number(maskForKeyframe[maskPropertyKey]) || 0))
+          : hasAdjustmentValue
+            ? adjustmentValue
+            : hasShapeValue
+              ? shapeProperties[property]
+              : (clip.transform?.[property] ?? adjustmentValue ?? 0)
       get().setKeyframe(clipId, property, clipTime, currentValue, 'easeInOut', { saveHistory: true })
       // If scale is linked, also add keyframe for the other scale property
       if (isLinked) {
@@ -4198,8 +4574,9 @@ export const useTimelineStore = create(
    */
   getActiveClipAtTime: (time) => {
     const state = get()
+    const anyVideoSolo = hasVideoSolo(state.tracks)
     // Get video tracks in reverse order (top track = highest priority)
-    const videoTracks = state.tracks.filter(t => t.type === 'video' && t.visible && !t.muted)
+    const videoTracks = state.tracks.filter(t => isVideoTrackVisible(t, anyVideoSolo))
     
     for (const track of videoTracks) {
       const clip = state.clips.find(c => 
@@ -4219,6 +4596,7 @@ export const useTimelineStore = create(
    */
   getActiveClipsAtTime: (time) => {
     const state = get()
+    const anyVideoSolo = hasVideoSolo(state.tracks)
     const activeClips = []
     const addedClipIds = new Set()
 
@@ -4241,7 +4619,9 @@ export const useTimelineStore = create(
       const clipB = state.clips.find(c => c.id === transition.clipBId)
       if (!clipA || !clipB) return
       const track = state.tracks.find(t => t.id === clipA.trackId)
-      if (!track || !track.visible || track.muted) return
+      if (!track || (track.type === 'video'
+        ? !isVideoTrackVisible(track, anyVideoSolo)
+        : !track.visible || track.muted)) return
       if (clipA.trackId !== clipB.trackId) return
       if (!isClipEnabled(clipA) || !isClipEnabled(clipB)) return
       removeActiveClip(clipA.id)
@@ -4251,7 +4631,9 @@ export const useTimelineStore = create(
     }
 
     for (const track of state.tracks) {
-      if (!track.visible || track.muted) continue
+      if (track.type === 'video') {
+        if (!isVideoTrackVisible(track, anyVideoSolo)) continue
+      } else if (!track.visible || track.muted) continue
 
       const trackClips = state.clips.filter(c =>
         c.trackId === track.id &&
@@ -4271,7 +4653,9 @@ export const useTimelineStore = create(
       if (!clipA || !clipB) continue
       if (clipA.trackId !== clipB.trackId) continue
       const track = state.tracks.find(t => t.id === clipA.trackId)
-      if (!track || !track.visible || track.muted) continue
+      if (!track || (track.type === 'video'
+        ? !isVideoTrackVisible(track, anyVideoSolo)
+        : !track.visible || track.muted)) continue
       const split = normalizeTransitionSplit(transition?.settings?.split, transition?.settings?.alignment || 'center')
       const editPoint = Number.isFinite(Number(transition.editPoint))
         ? Number(transition.editPoint)
@@ -4296,6 +4680,7 @@ export const useTimelineStore = create(
    */
   getTransitionAtTime: (time) => {
     const state = get()
+    const anyVideoSolo = hasVideoSolo(state.tracks)
     const safeTime = Number(time)
     if (!Number.isFinite(safeTime)) return null
 
@@ -4314,7 +4699,7 @@ export const useTimelineStore = create(
         if (!clip) continue
 
         const clipTrack = state.tracks.find(t => t.id === clip.trackId)
-        if (!clipTrack || clipTrack.type !== 'video' || !clipTrack.visible || clipTrack.muted) continue
+        if (!isVideoTrackVisible(clipTrack, anyVideoSolo)) continue
 
         const duration = Math.min(Number(transition.duration) || 0, Number(clip.duration) || 0)
         if (duration <= 0) continue
@@ -4352,7 +4737,7 @@ export const useTimelineStore = create(
       if (!clipA || !clipB) continue
 
       const clipTrack = state.tracks.find(t => t.id === clipA.trackId)
-      if (!clipTrack || clipTrack.type !== 'video' || !clipTrack.visible || clipTrack.muted) continue
+      if (!isVideoTrackVisible(clipTrack, anyVideoSolo)) continue
       if (clipA.trackId !== clipB.trackId) continue
       const duration = Number(transition.duration)
       if (!Number.isFinite(duration) || duration <= 0) continue
@@ -4666,10 +5051,11 @@ export const useTimelineStore = create(
   },
 
   /**
-   * Set zoom level (20% - 2000%)
+   * Set zoom level (0.5% - 2000%). Absolute bounds only — the timeline
+   * enforces its content-aware floor (getMinZoom) at the call sites.
    */
   setZoom: (zoom) => {
-    set({ zoom: Math.max(20, Math.min(2000, zoom)) })
+    set({ zoom: Math.max(0.5, Math.min(2000, zoom)) })
   },
 
   /**
@@ -4684,13 +5070,15 @@ export const useTimelineStore = create(
   },
 
   /**
-   * Toggle track solo (audio tracks). Solo does not override mute; when any
-   * audio track is soloed, only soloed unmuted audio tracks are audible.
+   * Toggle track solo. Audio solo controls audibility; video solo controls
+   * picture visibility. Multiple tracks of the same type can be soloed.
    */
   toggleTrackSolo: (trackId) => {
     set((state) => ({
       tracks: state.tracks.map(track =>
-        track.id === trackId ? { ...track, solo: !track.solo } : track
+        track.id === trackId && (track.type === 'audio' || track.type === 'video')
+          ? { ...track, solo: !track.solo }
+          : track
       )
     }))
   },
@@ -5384,6 +5772,7 @@ export const useTimelineStore = create(
     }),
     {
       name: 'vidwright-timeline', // localStorage key
+      storage: createDebouncedJSONStorage(() => localStorage),
       partialize: (state) => ({
         // Only persist these fields (exclude transient UI state)
         duration: state.duration,

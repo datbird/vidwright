@@ -11,6 +11,7 @@ import useProjectStore from '../stores/projectStore'
 import useAssetsStore from '../stores/assetsStore'
 import { normalizeAdjustmentSettings } from '../utils/adjustments'
 import { normalizeClipCompositeMode } from '../utils/layerCompositing'
+import { hasVideoSolo, isVideoTrackVisible } from '../utils/videoTrackVisibility'
 
 const CACHE_DIR = 'cache'
 // v2: frame-start sampling (sampleAtFrameCenter: false) — files rendered
@@ -204,12 +205,15 @@ function buildClipSignature(clip) {
       blendMode: transform.blendMode || 'normal',
       blur: roundNumber(transform.blur),
     },
-    adjustments: (clip.type === 'adjustment' || clip.type === 'video' || clip.type === 'image' || clip.type === 'text' || clip.type === 'shape')
+    adjustments: (clip.type === 'adjustment' || clip.type === 'video' || clip.type === 'image' || clip.type === 'text' || clip.type === 'shape' || clip.type === 'captions')
       ? normalizeAdjustmentSettings(clip.adjustments || {})
       : null,
+    shapeMask: clip.shapeMask || null,
+    bypass: clip.bypass || null,
     effects,
     textProperties,
     shapeProperties,
+    captions: clip.captions || null,
     keyframes,
   }
 }
@@ -222,6 +226,7 @@ function buildTrackSignature(track) {
     type: track.type || null,
     visible: track.visible !== false,
     muted: Boolean(track.muted),
+    solo: Boolean(track.solo),
     locked: Boolean(track.locked),
     channels: track.channels || null,
   }
@@ -261,9 +266,10 @@ function buildAssetSignature(asset, assetId) {
 }
 
 function getVisibleVideoTrackIds(tracks = []) {
+  const anyVideoSolo = hasVideoSolo(tracks)
   return new Set(
     tracks
-      .filter((track) => track?.type === 'video' && track.visible !== false)
+      .filter((track) => isVideoTrackVisible(track, anyVideoSolo))
       .map((track) => track.id)
   )
 }
@@ -305,6 +311,7 @@ export function getPreviewComplexity(timelineState) {
   const transitions = Array.isArray(timelineState?.transitions) ? timelineState.transitions : []
 
   const trackById = new Map(tracks.map((track) => [track.id, track]))
+  const anyVideoSolo = hasVideoSolo(tracks)
   let videoClipCount = 0
   let audioClipCount = 0
   let textClipCount = 0
@@ -315,7 +322,7 @@ export function getPreviewComplexity(timelineState) {
     if (!clip) continue
     if (clip.enabled === false) continue
     const track = trackById.get(clip.trackId)
-    if (clip.type === 'video' && track?.type === 'video' && track.visible !== false) {
+    if (clip.type === 'video' && isVideoTrackVisible(track, anyVideoSolo)) {
       videoClipCount += 1
     } else if (clip.type === 'audio' && track?.type === 'audio' && track.visible !== false) {
       audioClipCount += 1

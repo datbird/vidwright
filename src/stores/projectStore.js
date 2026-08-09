@@ -18,6 +18,7 @@ import {
 import { useTimelineStore } from './timelineStore'
 import { useAssetsStore } from './assetsStore'
 import { captureAndSaveProjectThumbnail } from '../utils/projectThumbnail'
+import { markProjectClean } from '../services/projectDirtyTracker'
 import {
   createDefaultFlowAiProjectData,
   normalizeFlowAiProjectData,
@@ -159,7 +160,7 @@ const hydrateOpenedProjectSession = async (projectHandleOrPath, rawProjectData, 
 
   const timelineFps = currentTimeline?.fps || projectData?.settings?.fps || 24
   useTimelineStore.getState().loadFromProject(currentTimeline, projectData.assets, timelineFps)
-  await useAssetsStore.getState().loadFromProject(
+  const assetsLoadResult = await useAssetsStore.getState().loadFromProject(
     projectData.assets,
     projectHandleOrPath,
     projectData.folders,
@@ -193,7 +194,30 @@ const hydrateOpenedProjectSession = async (projectHandleOrPath, rawProjectData, 
     error: null,
     lastFailedProjectHandle: null,
     lastFailedProjectName: null,
+    // Start the autosave backstop clock at open, so a freshly opened project
+    // is not immediately "overdue" from a previous session's timestamp.
+    lastAutoSave: new Date().toISOString(),
   }))
+
+  // Hydration replaced every watched store slice; none of it is an unsaved
+  // user change.
+  markProjectClean()
+
+  // Auto-relinked media means the project file on disk still holds dead
+  // old-machine paths; persist the repaired records now so the fix is
+  // durable rather than re-derived on every open. Save failures are
+  // non-fatal — the fallback simply runs again next open.
+  const autoRelinkedAssets = assetsLoadResult?.autoRelinkedAssets || []
+  if (autoRelinkedAssets.length > 0) {
+    try {
+      const saved = await useProjectStore.getState().saveProject()
+      if (!saved) {
+        console.warn('Auto-relinked media paths were not saved; they will re-resolve on next open.')
+      }
+    } catch (err) {
+      console.warn('Auto-relinked media paths were not saved; they will re-resolve on next open:', err)
+    }
+  }
 
   return projectData
 }
@@ -642,13 +666,18 @@ export const useProjectStore = create(
           
           // Update recent projects list
           set((state) => ({
-            recentProjects: state.recentProjects.map(p => 
-              p.name === updatedProject.name 
+            recentProjects: state.recentProjects.map(p =>
+              p.name === updatedProject.name
                 ? { ...p, modified: updatedProject.modified, thumbnail: thumbnailPointer }
                 : p
             ),
           }))
-          
+
+          // After the save-induced set() calls above, so their transient
+          // dirty mark is cleared too. Everything gathered above is now on
+          // disk.
+          markProjectClean()
+
           return true
         } catch (err) {
           console.error('Error saving project:', err)

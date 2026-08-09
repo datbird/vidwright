@@ -8,6 +8,7 @@ import { DEFAULT_SHAPE_PROPERTIES, getShapeDisplayName, normalizeShapeProperties
 import { EFFECT_TYPES, getEffectPropertyId, getEffectTypeDefinition } from '../utils/effects'
 import { normalizeAdjustmentSettings } from '../utils/adjustments'
 import { normalizeTrackMatte } from '../utils/trackMatte'
+import { DEFAULT_SHAPE_MASK, DEFAULT_SPLINE_POINTS, SHAPE_MASK_TYPES, normalizeShapeMask, normalizeSplinePoints } from '../utils/shapeMask'
 import { clampTrackPan, clampTrackVolume } from '../utils/audioTrackAudibility'
 import { normalizeAudioInserts } from '../utils/audioInserts'
 import {
@@ -31,7 +32,10 @@ import {
 } from './workflowInstallJobs'
 import { saveLocalComfyConnectionPort } from './localComfyConnection'
 import { getAbsoluteFileUrl, importAsset, writeGeneratedOverlayToProject } from './fileSystem'
+import { canImportImageSequences, importImageSequenceAsAsset } from './imageSequenceImport'
+import { detectImageSequences, parseSequenceFileName } from '../utils/imageSequenceDetection'
 import buildFcpXml from './fcpxmlExporter'
+import buildPremiereXml from './premiereXmlExporter'
 import {
   handleTranscribeCaptions,
   handleGetCaptionStatus,
@@ -39,7 +43,7 @@ import {
   handleGenerateCaptions,
 } from './mcpCaptions'
 
-export const MCP_ACTION_BRIDGE_VERSION = 2
+export const MCP_ACTION_BRIDGE_VERSION = 5
 
 const MCP_PROJECT_CHECKPOINTS = new Map()
 const MCP_PROJECT_CHECKPOINT_LIMIT = 20
@@ -185,11 +189,11 @@ function summarizeTrack(track) {
     muted: !!track.muted,
     locked: !!track.locked,
     visible: track.visible !== false,
+    solo: !!track.solo,
     role: track.role || null,
     channels: track.channels || null,
     ...(track.type === 'audio'
       ? {
-        solo: !!track.solo,
         volume: clampTrackVolume(track.volume),
         pan: clampTrackPan(track.pan),
         inserts: normalizeAudioInserts(track.inserts),
@@ -789,6 +793,21 @@ for (const group of ['shadows', 'midtones', 'highlights']) {
     CLIP_KEYFRAME_NUMBER_FIELDS[`${group}.${property}`] = [0, -100, 100]
   }
   CLIP_KEYFRAME_NUMBER_FIELDS[`${group}.hue`] = [0, -180, 180]
+}
+
+// Whole-mask animation (shapeMask.* namespace, matching the store's keyframe
+// keys). The Mask Shape row's points-array snapshots are not exposed here —
+// per-point spline animation stays a UI gesture for now.
+for (const [maskProperty, range] of Object.entries({
+  centerX: [50, -50, 150],
+  centerY: [50, -50, 150],
+  width: [60, 1, 200],
+  height: [60, 1, 200],
+  rotation: [0, -180, 180],
+  cornerRadius: [12, 0, 100],
+  feather: [5, 0, 50],
+})) {
+  CLIP_KEYFRAME_NUMBER_FIELDS[`shapeMask.${maskProperty}`] = range
 }
 
 const CLIP_KEYFRAME_PROPERTIES = new Set(Object.keys(CLIP_KEYFRAME_NUMBER_FIELDS))
@@ -1423,6 +1442,14 @@ function normalizeClipKeyframes(payload = {}, clip = null) {
     if (SHAPE_KEYFRAME_PROPERTIES.has(property) && clip?.type !== 'shape') {
       throw new Error(`Shape keyframe property "${property}" can only be used on shape clips.`)
     }
+    if (property.startsWith('shapeMask.') && clip) {
+      if (clip.type !== 'video' && clip.type !== 'image') {
+        throw new Error(`Mask keyframe property "${property}" applies to video and image clips only.`)
+      }
+      if (!normalizeShapeMask(clip.shapeMask)) {
+        throw new Error(`Clip ${clip.id} has no shape mask to animate. Create one first with set_clip_mask.`)
+      }
+    }
     if (property === 'speed' && clip && clip.type !== 'video') {
       throw new Error('Speed ramp keyframes ("speed") can only be used on video clips.')
     }
@@ -1473,6 +1500,14 @@ function buildClipKeyframeSummary(clip) {
 function validateClipKeyframePropertyForClip(property, clip = null) {
   if (clip && SHAPE_KEYFRAME_PROPERTIES.has(property) && clip.type !== 'shape') {
     throw new Error(`Shape keyframe property "${property}" can only be used on shape clips.`)
+  }
+  if (clip && property.startsWith('shapeMask.')) {
+    if (clip.type !== 'video' && clip.type !== 'image') {
+      throw new Error(`Mask keyframe property "${property}" applies to video and image clips only.`)
+    }
+    if (!normalizeShapeMask(clip.shapeMask)) {
+      throw new Error(`Clip ${clip.id} has no shape mask to animate. Create one first with set_clip_mask.`)
+    }
   }
 }
 
@@ -1829,8 +1864,8 @@ function handleSetClipsEnabled(payload = {}) {
 async function handlePrepareGenerationFromTimelineContext(payload = {}) {
   const state = useTimelineStore.getState()
   const mode = String(payload.mode || 'extend').trim().toLowerCase() === 'keyframe' ? 'keyframe' : 'extend'
-  const workflowId = String(payload.workflowId || 'ltx23-i2v').trim() || 'ltx23-i2v'
   const category = String(payload.category || 'video').trim().toLowerCase() || 'video'
+  const workflowId = String(payload.workflowId || '').trim() || (category === 'image' ? 'image-edit' : 'ltx23-i2v')
   const prompt = String(payload.prompt || '').trim().slice(0, 5000)
   const negativePrompt = String(payload.negativePrompt || '').trim().slice(0, 2000)
   const requestedResolution = resolveMcpGenerationResolution(payload)
@@ -1863,6 +1898,9 @@ async function handlePrepareGenerationFromTimelineContext(payload = {}) {
     ...captured,
     mode,
     workflowId,
+    // Category rides on the frame so the Generate workspace applies it even
+    // when the tab mounts after this event has already fired (#86).
+    category,
     prompt,
     negativePrompt,
     source: 'mcp',
@@ -1952,6 +1990,216 @@ async function handleQueuePreparedGeneration(payload = {}) {
   })
 }
 
+async function waitForGenerateWorkspaceReady(timeoutMs = 30000) {
+  if (typeof window === 'undefined') {
+    throw new Error('Music Video tools are only available in the renderer.')
+  }
+
+  window.dispatchEvent(new CustomEvent('vidwright-open-generate-tab', {
+    detail: { source: 'mcp-generate-workspace' },
+  }))
+
+  return await new Promise((resolve, reject) => {
+    const startedAt = Date.now()
+    const readyTimeoutMs = Math.min(timeoutMs, 10000)
+    let probeTimer = null
+    let settled = false
+    const finish = (callback, value) => {
+      if (settled) return
+      settled = true
+      if (probeTimer) clearTimeout(probeTimer)
+      callback(value)
+    }
+    const probe = () => {
+      window.dispatchEvent(new CustomEvent('vidwright-mcp-music-video-keyframe-probe', {
+        detail: {
+          respond: () => finish(resolve),
+        },
+      }))
+      if (settled) return
+      if (Date.now() - startedAt >= readyTimeoutMs) {
+        finish(reject, new Error('The Generate workspace did not become ready. Open a Vidwright project and try again.'))
+        return
+      }
+      probeTimer = setTimeout(probe, 100)
+    }
+    probe()
+  })
+}
+
+async function dispatchMusicVideoWorkspaceRequest(payload = {}, {
+  operation,
+  eventName,
+  errorLabel = 'Music Video request',
+} = {}) {
+  if (typeof window === 'undefined') {
+    throw new Error('Music Video tools are only available in the renderer.')
+  }
+
+  const timeoutMs = Math.min(120000, Math.max(1000, Number(payload.timeoutMs) || 30000))
+  await waitForGenerateWorkspaceReady(timeoutMs)
+
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (callback, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      callback(value)
+    }
+
+    const timeout = setTimeout(() => {
+      finish(reject, new Error('The Music Video workspace did not respond. Open Generate > Create Beta > Music Video Generation and try again.'))
+    }, timeoutMs)
+
+    window.dispatchEvent(new CustomEvent(eventName, {
+      detail: {
+        ...payload,
+        operation,
+        respond: (result = {}) => {
+          if (result?.success === false) {
+            finish(reject, new Error(result.error || result.message || `Could not process the ${errorLabel}.`))
+            return
+          }
+          finish(resolve, result)
+        },
+      },
+    }))
+  })
+}
+
+async function handleInspectMusicVideoKeyframe(payload = {}) {
+  return await dispatchMusicVideoWorkspaceRequest(payload, {
+    operation: 'inspect',
+    eventName: 'vidwright-mcp-music-video-keyframe',
+    errorLabel: 'Music Video keyframe inspection',
+  })
+}
+
+async function handleRegenerateMusicVideoKeyframe(payload = {}) {
+  return await dispatchMusicVideoWorkspaceRequest(payload, {
+    operation: 'regenerate',
+    eventName: 'vidwright-mcp-music-video-keyframe',
+    errorLabel: 'Music Video keyframe regeneration',
+  })
+}
+
+async function handleGetMusicVideoPlan(payload = {}) {
+  return await dispatchMusicVideoWorkspaceRequest(payload, {
+    operation: 'get-plan',
+    eventName: 'vidwright-mcp-music-video-workflow',
+    errorLabel: 'Music Video plan inspection',
+  })
+}
+
+async function handleInspectMusicVideoVideo(payload = {}) {
+  return await dispatchMusicVideoWorkspaceRequest(payload, {
+    operation: 'inspect-video',
+    eventName: 'vidwright-mcp-music-video-workflow',
+    errorLabel: 'Music Video Step 5 inspection',
+  })
+}
+
+async function handleRegenerateMusicVideoVideo(payload = {}) {
+  return await dispatchMusicVideoWorkspaceRequest(payload, {
+    operation: 'regenerate-video',
+    eventName: 'vidwright-mcp-music-video-workflow',
+    errorLabel: 'Music Video Step 5 regeneration',
+  })
+}
+
+async function handleMusicVideoWorkspaceOperation(operation, payload = {}, errorLabel = 'Music Video request') {
+  return await dispatchMusicVideoWorkspaceRequest(payload, {
+    operation,
+    eventName: 'vidwright-mcp-music-video-workflow',
+    errorLabel,
+  })
+}
+
+async function handleReplaceMusicVideoTimelineShot(payload = {}) {
+  const resolved = await handleMusicVideoWorkspaceOperation(
+    'resolve-timeline-shot',
+    payload,
+    'Music Video timeline shot replacement'
+  )
+  const replacement = handleReplaceClipWithAsset({
+    ...payload,
+    clipId: resolved.clipId,
+    assetId: resolved.assetId,
+    preserveDuration: payload.preserveDuration !== false,
+    preserveTrim: payload.preserveTrim === true,
+    previewOnly: payload.previewOnly !== false,
+  })
+
+  if (payload.previewOnly !== false) {
+    return {
+      ...replacement,
+      action: 'replace_music_video_timeline_shot',
+      target: resolved,
+      message: 'Music Video timeline replacement plan only. No timeline change was made.',
+    }
+  }
+
+  useTimelineStore.setState((state) => ({
+    clips: (state.clips || []).map((clip) => {
+      if (clip.id !== resolved.clipId) return clip
+      const musicVideoAssembly = {
+        ...(safeClone(clip?.metadata?.musicVideoAssembly) || {}),
+        assetId: resolved.assetId,
+        replacedAt: new Date().toISOString(),
+      }
+      return {
+        ...clip,
+        metadata: {
+          ...(safeClone(clip.metadata) || {}),
+          musicVideoAssembly,
+        },
+      }
+    }),
+  }))
+
+  return {
+    ...replacement,
+    action: 'replace_music_video_timeline_shot',
+    target: resolved,
+    message: `Replaced the assembled ${resolved.sceneId} ${resolved.shotId} clip while preserving its timeline edit.`,
+  }
+}
+
+async function handleSaveProject(payload = {}) {
+  const projectState = useProjectStore.getState()
+  if (!projectState.currentProjectHandle || !projectState.currentProject) {
+    throw new Error('Open a Vidwright project before saving.')
+  }
+  const previewOnly = payload.previewOnly !== false
+  const project = {
+    name: projectState.currentProject?.name || '',
+    path: typeof projectState.currentProjectHandle === 'string' ? projectState.currentProjectHandle : null,
+    modified: projectState.currentProject?.modified || null,
+  }
+  if (previewOnly) {
+    return {
+      previewOnly: true,
+      action: 'save_project',
+      project,
+      message: `Previewed saving "${project.name || 'the current project'}". No file was written.`,
+    }
+  }
+  const saved = await projectState.saveProject()
+  if (!saved) throw new Error('Vidwright could not save the current project.')
+  const nextProject = useProjectStore.getState().currentProject
+  return {
+    success: true,
+    previewOnly: false,
+    action: 'save_project',
+    project: {
+      ...project,
+      modified: nextProject?.modified || null,
+    },
+    message: `Saved "${nextProject?.name || project.name || 'the current project'}".`,
+  }
+}
+
 async function handleQueueTimelineGenerationBatch(payload = {}) {
   if (typeof window === 'undefined') {
     throw new Error('Generate batch queue bridge is only available in the renderer.')
@@ -2036,6 +2284,40 @@ async function handleQueueTimelineTemplateGeneration(payload = {}) {
         respond: (result = {}) => {
           if (result?.success === false) {
             finish(reject, new Error(result.error || result.message || 'Could not queue template generation.'))
+            return
+          }
+          finish(resolve, result)
+        },
+      },
+    }))
+  })
+}
+
+async function handleGetGenerationQueueStatus(payload = {}) {
+  if (typeof window === 'undefined') {
+    throw new Error('Generation queue status is only available in the renderer.')
+  }
+
+  const timeoutMs = Math.min(30000, Math.max(1000, Number(payload.timeoutMs) || 10000))
+  await waitForGenerateWorkspaceReady(timeoutMs)
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (callback, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      callback(value)
+    }
+    const timeout = setTimeout(() => {
+      finish(reject, new Error('Generate workspace did not respond to the MCP queue-status request.'))
+    }, timeoutMs)
+
+    window.dispatchEvent(new CustomEvent('vidwright-mcp-get-generation-queue-status', {
+      detail: {
+        ...payload,
+        respond: (result = {}) => {
+          if (result?.success === false) {
+            finish(reject, new Error(result.error || result.message || 'Could not inspect the generation queue.'))
             return
           }
           finish(resolve, result)
@@ -2424,6 +2706,7 @@ async function handleQueuePromptGenerationBatch(payload = {}) {
   }
 
   const timeoutMs = Math.min(120000, Math.max(1000, Number(payload.timeoutMs) || 30000))
+  await waitForGenerateWorkspaceReady(timeoutMs)
   return await new Promise((resolve, reject) => {
     let settled = false
     const finish = (callback, value) => {
@@ -3469,7 +3752,7 @@ function handleUpdateTrack(payload = {}) {
   const updates = {}
   if (Object.prototype.hasOwnProperty.call(payload, 'name')) updates.name = String(payload.name || '').trim().slice(0, 80)
   if (Object.prototype.hasOwnProperty.call(payload, 'muted')) updates.muted = payload.muted === true
-  if (current.type === 'audio' && Object.prototype.hasOwnProperty.call(payload, 'solo')) updates.solo = payload.solo === true
+  if ((current.type === 'audio' || current.type === 'video') && Object.prototype.hasOwnProperty.call(payload, 'solo')) updates.solo = payload.solo === true
   if (current.type === 'audio' && Object.prototype.hasOwnProperty.call(payload, 'volume')) updates.volume = clampTrackVolume(payload.volume)
   if (current.type === 'audio' && Object.prototype.hasOwnProperty.call(payload, 'pan')) updates.pan = clampTrackPan(payload.pan)
   if (current.type === 'audio' && Object.prototype.hasOwnProperty.call(payload, 'inserts')) updates.inserts = normalizeAudioInserts(payload.inserts)
@@ -5238,10 +5521,27 @@ function handleAddAssetToTimeline(payload = {}) {
   const startTime = resolveMcpAssetPlacementStart(initialState, target.track?.id || '', payload)
   const fps = Number(initialState.timelineFps) || 24
   const duration = Number(payload.durationSeconds ?? payload.duration)
+  // Source in/out range (issue #89): the clip is born pre-trimmed and, when
+  // no explicit duration is given, sized to the marked range.
+  const sourceIn = Number(payload.sourceInSeconds ?? payload.sourceIn)
+  const sourceOut = Number(payload.sourceOutSeconds ?? payload.sourceOut)
+  const hasSourceIn = Number.isFinite(sourceIn) && sourceIn > 0
+  const assetSourceDuration = Number(asset.duration ?? asset.settings?.duration) || 0
+  const sourceRangeDuration = (() => {
+    const start = hasSourceIn ? sourceIn : 0
+    const end = Number.isFinite(sourceOut) && sourceOut > start
+      ? sourceOut
+      : (hasSourceIn && assetSourceDuration > start ? assetSourceDuration : NaN)
+    return Number.isFinite(end) ? end - start : NaN
+  })()
+  const effectiveDuration = Number.isFinite(duration) && duration > 0
+    ? duration
+    : (Number.isFinite(sourceRangeDuration) && sourceRangeDuration > 0 ? sourceRangeDuration : NaN)
   const options = {
     selectAfterAdd: payload.selectAfterAdd !== false,
     resolveOverlaps: payload.resolveOverlaps !== false,
-    ...(Number.isFinite(duration) && duration > 0 ? { duration: roundToTimelineFrame(duration, fps) } : {}),
+    ...(hasSourceIn ? { trimStart: sourceIn } : {}),
+    ...(Number.isFinite(effectiveDuration) && effectiveDuration > 0 ? { duration: roundToTimelineFrame(effectiveDuration, fps) } : {}),
     ...(payload.transform && typeof payload.transform === 'object' ? { transform: safeClone(payload.transform) } : {}),
     metadata: {
       addedByMcp: true,
@@ -5256,6 +5556,7 @@ function handleAddAssetToTimeline(payload = {}) {
     createTrack: target.createTrack,
     startSeconds: startTime,
     durationSeconds: options.duration || (asset.type === 'image' ? 5 : (Number(asset.duration ?? asset.settings?.duration) || 5)),
+    sourceInSeconds: hasSourceIn ? sourceIn : null,
     resolveOverlaps: options.resolveOverlaps,
     selectAfterAdd: options.selectAfterAdd,
     placement: normalizeAssetTimelinePlacement(payload.at || payload.placement || payload.position),
@@ -5318,6 +5619,9 @@ function handleAddAssetToTimeline(payload = {}) {
       selectAfterAdd: false,
       resolveOverlaps: options.resolveOverlaps,
       duration: clip.duration,
+      // Mirror the source trim so picture and embedded audio stay in sync
+      // on a partial (in/out) insert.
+      ...(options.trimStart != null ? { trimStart: options.trimStart } : {}),
       metadata: {
         addedByMcp: true,
         addedAt: new Date().toISOString(),
@@ -6472,9 +6776,26 @@ async function handleExportTimeline(payload = {}) {
 }
 
 async function handleExportFcpXml(payload = {}) {
+  const requestedFormat = String(payload.format || payload.xmlFormat || 'fcpxml').trim().toLowerCase()
+  const isPremiereXml = ['premiere', 'premiere-xml', 'fcp7', 'xmeml'].includes(requestedFormat)
+  const exportConfig = isPremiereXml
+    ? {
+        format: 'premiere',
+        label: 'Premiere XML',
+        extension: 'xml',
+        xmlDialect: 'xmeml-v5',
+        buildXml: buildPremiereXml,
+      }
+    : {
+        format: 'fcpxml',
+        label: 'FCPXML',
+        extension: 'fcpxml',
+        xmlDialect: 'fcpxml-1.10',
+        buildXml: buildFcpXml,
+      }
   const api = typeof window !== 'undefined' ? window.electronAPI : null
   if (!api?.writeFile || !api?.pathJoin || !api?.createDirectory) {
-    throw new Error('FCPXML export is only available in the desktop app.')
+    throw new Error(`${exportConfig.label} export is only available in the desktop app.`)
   }
 
   const projectState = useProjectStore.getState()
@@ -6482,7 +6803,7 @@ async function handleExportFcpXml(payload = {}) {
   const assetsState = useAssetsStore.getState()
   const projectPath = projectState.currentProjectHandle
   if (typeof projectPath !== 'string' || !projectPath) {
-    throw new Error('Open a saved project before exporting FCPXML.')
+    throw new Error(`Open a saved project before exporting ${exportConfig.label}.`)
   }
 
   const project = projectState.currentProject || {}
@@ -6509,7 +6830,7 @@ async function handleExportFcpXml(payload = {}) {
     && exportableAssetIds.has(clip.assetId)
   )).length
   if (exportableClipCount === 0) {
-    throw new Error('No media clips with project file paths are available for FCPXML export.')
+    throw new Error(`No media clips with project file paths are available for ${exportConfig.label} export.`)
   }
 
   const width = Math.max(1, Math.round(Number(timelineSettings.width || project.settings?.width || 1920)))
@@ -6518,7 +6839,7 @@ async function handleExportFcpXml(payload = {}) {
   const timelineEnd = typeof timelineState.getTimelineEndTime === 'function'
     ? timelineState.getTimelineEndTime()
     : getTimelineEndTimeForMcp(timelineState.clips || [], timelineState.duration || currentTimeline?.duration || 0)
-  const xml = buildFcpXml({
+  const xml = exportConfig.buildXml({
     projectName: project.name || 'Vidwright Project',
     timelineName,
     timelineSettings: { width, height, fps },
@@ -6537,16 +6858,18 @@ async function handleExportFcpXml(payload = {}) {
   const outputPath = String(payload.outputPath || '').trim()
     || await api.pathJoin(
       outputFolder,
-      `${sanitizeExportBaseName(payload.filename || `${project.name || 'Vidwright'}_${timelineName}`)}_${Date.now()}.fcpxml`
+      `${sanitizeExportBaseName(payload.filename || `${project.name || 'Vidwright'}_${timelineName}`)}_${Date.now()}.${exportConfig.extension}`
     )
   const writeResult = await api.writeFile(outputPath, xml, { encoding: 'utf8' })
   if (!writeResult?.success) {
-    throw new Error(writeResult?.error || 'Failed to write FCPXML file.')
+    throw new Error(writeResult?.error || `Failed to write ${exportConfig.label} file.`)
   }
 
   return {
     exported: true,
     action: 'export_fcpxml',
+    format: exportConfig.format,
+    xmlDialect: exportConfig.xmlDialect,
     outputPath,
     clipCount: exportableClipCount,
     timeline: {
@@ -7444,11 +7767,130 @@ async function resolveMcpFolderIdForImportedAsset(payload = {}) {
   return created.folderId || null
 }
 
+// Resolve an image sequence from an absolute path: a directory containing one
+// numbered run, or any single frame of a run (its siblings are scanned).
+// Returns { sequence } or null when the path is not sequence-shaped; throws on
+// genuine ambiguity (a directory holding several runs).
+async function resolveMcpImageSequence(sourcePath) {
+  if (!canImportImageSequences()) return null
+  const api = window.electronAPI
+
+  const listed = await api.listDirectory(sourcePath)
+  if (listed?.success) {
+    const files = (listed.items || [])
+      .filter((item) => item.isFile)
+      .map((item) => ({ name: item.name, path: item.path }))
+    const { sequences } = detectImageSequences(files)
+    if (sequences.length === 0) return null
+    if (sequences.length > 1) {
+      throw new Error(`Directory contains ${sequences.length} image sequences (${sequences.map((seq) => seq.displayName).join(', ')}). Pass the path of one frame from the run you want.`)
+    }
+    return { sequence: sequences[0] }
+  }
+
+  const fileName = sourcePath.split(/[\\/]/).pop() || ''
+  const parsed = parseSequenceFileName(fileName)
+  if (!parsed) return null
+  const dirPath = sourcePath.replace(/[\\/][^\\/]*$/, '')
+  const siblingListing = await api.listDirectory(dirPath)
+  if (!siblingListing?.success) return null
+  const siblings = (siblingListing.items || [])
+    .filter((item) => item.isFile)
+    .map((item) => ({ name: item.name, path: item.path }))
+  const { sequences } = detectImageSequences(siblings)
+  const match = sequences.find((seq) => (
+    seq.prefix.toLowerCase() === parsed.prefix.toLowerCase() && seq.ext === parsed.ext
+  ))
+  return match ? { sequence: match } : null
+}
+
 async function handleImportAssetFromPath(payload = {}) {
   const sourcePath = String(payload.path || payload.filePath || payload.sourcePath || '').trim()
   if (!sourcePath) throw new Error('Provide path, filePath, or sourcePath for import_asset_from_path.')
   if (!useProjectStore.getState().currentProjectHandle) throw new Error('Open a saved Vidwright project before importing assets.')
   if (!isAbsoluteMcpFilePath(sourcePath)) throw new Error('Provide an absolute local file path to import.')
+
+  // Image sequences: a directory or any numbered frame imports the whole run
+  // as one clip through a one-time ffmpeg intermediate, tagged with its
+  // sequence provenance. asSequence true forces, false disables, absent =
+  // auto-detect.
+  const sequenceMode = payload.asSequence === false ? 'off' : (payload.asSequence === true ? 'force' : 'auto')
+  if (sequenceMode !== 'off') {
+    const resolved = await resolveMcpImageSequence(sourcePath)
+    if (!resolved && sequenceMode === 'force') {
+      throw new Error('No image sequence found at this path. Point at a folder containing a numbered run, or at any one frame of it (3+ frames, e.g. shot.1001.png).')
+    }
+    if (resolved) {
+      const { sequence } = resolved
+      const timelineSettings = useProjectStore.getState().getCurrentTimelineSettings?.()
+      const fps = Number(payload.fps) > 0
+        ? Number(payload.fps)
+        : (Number(timelineSettings?.fps) > 0 ? Number(timelineSettings.fps) : (Number(useTimelineStore.getState().timelineFps) || 24))
+
+      if (payload.previewOnly !== false) {
+        return {
+          previewOnly: true,
+          action: 'import_asset_from_path',
+          message: 'Image sequence import plan only. No transcode was run.',
+          sequence: {
+            displayName: sequence.displayName,
+            pattern: sequence.pattern,
+            frameCount: sequence.count,
+            startFrame: sequence.start,
+            endFrame: sequence.end,
+            missingFrames: sequence.missing,
+            fps,
+            ...(sequence.ext === '.exr' ? { colorTransform: 'linear-to-bt709 (experimental)' } : {}),
+            note: 'Frames transcode once into an editing intermediate (H.264, or VP9 when frames carry alpha); gaps hold the previous frame. Long runs transcode inline — very large sequences may be faster through the app UI.',
+          },
+          targetFolder: payload.folderId || payload.folderPath || payload.folderName || null,
+          suggestedApplyPayload: { ...payload, asSequence: true, fps, previewOnly: false },
+        }
+      }
+
+      const folderId = await resolveMcpFolderIdForImportedAsset(payload)
+      const projectHandle = useProjectStore.getState().currentProjectHandle
+      const assetPayload = await importImageSequenceAsAsset({
+        projectDir: projectHandle,
+        sequence,
+        fps,
+        jobId: `mcp_seq_${Date.now().toString(36)}`,
+      })
+      const asset = useAssetsStore.getState().addAsset({
+        ...assetPayload,
+        folderId,
+        sourceTool: 'import_asset_from_path',
+        settings: {
+          ...(assetPayload.settings || {}),
+          importedViaMcp: true,
+          sourcePath,
+        },
+      })
+      const savedProject = typeof useProjectStore.getState().saveProject === 'function'
+        ? await useProjectStore.getState().saveProject()
+        : null
+      return {
+        success: true,
+        action: 'import_asset_from_path',
+        message: `Imported ${sequence.count}-frame image sequence as one clip (${sequence.displayName} @ ${fps}fps).`,
+        sourcePath,
+        category: 'video',
+        importedAsSequence: true,
+        sequence: {
+          pattern: sequence.pattern,
+          frameCount: sequence.count,
+          startFrame: sequence.start,
+          endFrame: sequence.end,
+          missingFrames: sequence.missing,
+          fps,
+        },
+        folderId,
+        asset: summarizeAsset(asset),
+        savedProject: Boolean(savedProject),
+      }
+    }
+  }
+
   const category = inferMcpAssetCategory(sourcePath, payload.category || payload.type || payload.assetType)
 
   let exists = true
@@ -7626,8 +8068,31 @@ function handleSetClipStyle(payload = {}) {
   if (trackMatteWasProvided && payload.trackMatte && trackMatte !== String(payload.trackMatte).trim().toLowerCase()) {
     throw new Error('Invalid trackMatte. Use one of: none, alpha, alpha-inverted, luma, luma-inverted. The visual layer directly above becomes the matte and is hidden from output.')
   }
-  if (!hasTransformUpdates && !labelWasProvided && !enabledWasProvided && !trackMatteWasProvided) {
-    throw new Error('Provide transform updates, trackMatte, labelColor, or enabled for set_clip_style.')
+  // Bypass pills (clip.bypass): per-group A/B switches for mask, color, and
+  // effects — settings stay untouched, preview and export both honor the
+  // flags through utils/clipBypass.js. true = bypassed, false = active again.
+  const bypassWasProvided = hasOwn(payload, 'bypass')
+  let bypassUpdates = null
+  if (bypassWasProvided) {
+    if (!payload.bypass || typeof payload.bypass !== 'object' || Array.isArray(payload.bypass)) {
+      throw new Error('bypass must be an object with boolean mask/color/effects keys, e.g. { "color": true }.')
+    }
+    bypassUpdates = {}
+    for (const [group, value] of Object.entries(payload.bypass)) {
+      if (!['mask', 'color', 'effects'].includes(group)) {
+        throw new Error(`Unknown bypass group "${group}". Valid groups: mask, color, effects.`)
+      }
+      if (typeof value !== 'boolean') {
+        throw new Error(`bypass.${group} must be true (bypassed) or false (active).`)
+      }
+      bypassUpdates[group] = value
+    }
+    if (Object.keys(bypassUpdates).length === 0) {
+      throw new Error('bypass was provided but empty. Pass at least one of mask/color/effects.')
+    }
+  }
+  if (!hasTransformUpdates && !labelWasProvided && !enabledWasProvided && !trackMatteWasProvided && !bypassWasProvided) {
+    throw new Error('Provide transform updates, trackMatte, bypass, labelColor, or enabled for set_clip_style.')
   }
 
   const plan = {
@@ -7640,11 +8105,13 @@ function handleSetClipStyle(payload = {}) {
       labelColor: labelWasProvided ? labelColor : undefined,
       enabled: enabledWasProvided ? Boolean(payload.enabled) : undefined,
       trackMatte: trackMatteWasProvided ? trackMatte : undefined,
+      bypass: bypassWasProvided ? bypassUpdates : undefined,
     },
     clips: clips.map((clip) => ({
       ...summarizeClip(clip),
       enabled: clip.enabled !== false,
       transform: clip.transform || {},
+      bypass: clip.bypass || null,
     })),
   }
 
@@ -7672,6 +8139,17 @@ function handleSetClipStyle(payload = {}) {
       if (labelWasProvided) nextClip.labelColor = labelColor
       if (enabledWasProvided) nextClip.enabled = Boolean(payload.enabled)
       if (trackMatteWasProvided) nextClip.trackMatte = trackMatte
+      if (bypassWasProvided) {
+        // Same shape setClipBypass keeps: only true flags stored, empty
+        // object drops the field entirely.
+        const nextBypass = { ...(clip.bypass || {}) }
+        for (const [group, on] of Object.entries(bypassUpdates)) {
+          if (on) nextBypass[group] = true
+          else delete nextBypass[group]
+        }
+        if (Object.keys(nextBypass).length === 0) delete nextClip.bypass
+        else nextClip.bypass = nextBypass
+      }
       return nextClip
     }),
   }))
@@ -7687,6 +8165,188 @@ function handleSetClipStyle(payload = {}) {
       ...summarizeClip(clip),
       enabled: clip.enabled !== false,
       transform: clip.transform || {},
+      bypass: clip.bypass || null,
+    })),
+  }
+}
+
+// The mask arc over MCP: parametric shape masks (rectangle/ellipse/rounded),
+// bezier spline masks (unit-box anchors with hIn/hOut handles), and AI raster
+// mask assignment (a {type:'mask'} effect referencing a mask asset) — the same
+// three modes as the Inspector's Mask section. Whole-mask animation goes
+// through set_clip_keyframes with the shapeMask.* properties; per-point spline
+// animation stays UI-only for now.
+function handleSetClipMask(payload = {}) {
+  const state = useTimelineStore.getState()
+  const { clips, missingClipIds, filter } = resolveMcpClipTargets(payload, state)
+  const limit = Math.min(200, Math.max(1, Math.floor(Number(payload.limit) || 25)))
+  if (clips.length === 0) throw new Error('No matching clips found for set_clip_mask.')
+  if (clips.length > limit) throw new Error(`Matched ${clips.length} clips, above limit ${limit}. Pass a higher limit intentionally if this is expected.`)
+
+  const eligible = clips.filter((clip) => clip.type === 'video' || clip.type === 'image')
+  if (eligible.length === 0) {
+    throw new Error('Shape and image masks apply to video and image clips only (the same rule as the Inspector Mask section).')
+  }
+  const skipped = clips.filter((clip) => clip.type !== 'video' && clip.type !== 'image').map((clip) => clip.id)
+
+  const shapeRaw = typeof payload.shape === 'string' ? payload.shape.trim().toLowerCase() : null
+  const clearShapeMask = payload.clear === true || shapeRaw === 'none'
+  const wantsImageMask = shapeRaw === 'image' || hasOwn(payload, 'maskAssetId')
+  const clearImageMask = payload.clearImageMask === true || (clearShapeMask && payload.clear === true)
+  const geometryKeys = ['centerX', 'centerY', 'width', 'height', 'rotation', 'cornerRadius', 'feather']
+  const geometryUpdates = {}
+  for (const key of geometryKeys) {
+    if (hasOwn(payload, key)) {
+      const value = Number(payload[key])
+      if (!Number.isFinite(value)) throw new Error(`${key} must be a number.`)
+      geometryUpdates[key] = value
+    }
+  }
+  const invertWasProvided = hasOwn(payload, 'invert')
+  const pointsWereProvided = hasOwn(payload, 'points')
+  const hasShapeIntent = Boolean((shapeRaw && shapeRaw !== 'none' && shapeRaw !== 'image')
+    || Object.keys(geometryUpdates).length > 0 || invertWasProvided || pointsWereProvided)
+
+  if (shapeRaw && shapeRaw !== 'none' && shapeRaw !== 'image' && !SHAPE_MASK_TYPES.includes(shapeRaw)) {
+    throw new Error(`Unknown shape "${shapeRaw}". Valid shapes: ${SHAPE_MASK_TYPES.join(', ')}, image, none.`)
+  }
+  if (!clearShapeMask && !wantsImageMask && !clearImageMask && !hasShapeIntent) {
+    throw new Error('Provide a shape (rectangle/ellipse/rounded/spline), geometry/feather/invert updates, points, maskAssetId (image mask), clearImageMask, or shape "none"/clear to remove.')
+  }
+
+  // Image-mask inputs resolve once, up front.
+  let maskAsset = null
+  if (wantsImageMask && !clearImageMask) {
+    const maskAssetId = String(payload.maskAssetId || '').trim()
+    if (!maskAssetId) throw new Error('shape "image" needs maskAssetId — a mask asset id from get_assets (type "mask").')
+    maskAsset = (useAssetsStore.getState().assets || []).find((asset) => asset.id === maskAssetId)
+    if (!maskAsset) throw new Error(`No asset found with id "${maskAssetId}".`)
+    if (maskAsset.type !== 'mask') {
+      throw new Error(`Asset "${maskAssetId}" is type "${maskAsset.type}". Image masks use mask assets (generate one with AI segmentation from the Assets panel, or pick an existing type "mask" asset).`)
+    }
+  }
+
+  // Build each clip's next shape mask so the preview shows exactly what will
+  // be written and normalizeShapeMask can reject bad input before any change.
+  const perClip = eligible.map((clip) => {
+    const currentMask = normalizeShapeMask(clip.shapeMask)
+    let nextMask
+    if (clearShapeMask) {
+      nextMask = null
+    } else if (hasShapeIntent) {
+      const targetShape = (shapeRaw && SHAPE_MASK_TYPES.includes(shapeRaw)) ? shapeRaw : currentMask?.shape
+      if (!targetShape) {
+        throw new Error(`Clip ${clip.id} has no mask yet — include a shape (rectangle, ellipse, rounded, or spline) to create one.`)
+      }
+      const base = currentMask || { ...DEFAULT_SHAPE_MASK }
+      const candidate = {
+        ...base,
+        ...geometryUpdates,
+        shape: targetShape,
+        ...(invertWasProvided ? { invert: Boolean(payload.invert) } : {}),
+      }
+      if (targetShape === 'spline') {
+        const points = pointsWereProvided
+          ? normalizeSplinePoints(payload.points)
+          : (currentMask?.points || DEFAULT_SPLINE_POINTS.map((p) => ({ x: p.x, y: p.y, hIn: { ...p.hIn }, hOut: { ...p.hOut } })))
+        if (!points) {
+          throw new Error('Spline masks need at least 3 points, each with numeric x/y in the mask unit box (-0.5..0.5 spans the mask width/height; hIn/hOut bezier handle offsets are optional).')
+        }
+        candidate.points = points
+      } else if (pointsWereProvided) {
+        throw new Error('points only apply when shape is "spline".')
+      }
+      nextMask = normalizeShapeMask(candidate)
+      if (!nextMask) throw new Error(`The mask for clip ${clip.id} did not validate — check shape and points.`)
+    } else {
+      nextMask = currentMask
+    }
+
+    const existingMaskEffects = (clip.effects || []).filter((effect) => effect?.type === 'mask')
+    return {
+      clip,
+      currentMask,
+      nextMask,
+      shapeMaskChanges: clearShapeMask || hasShapeIntent,
+      existingMaskEffects,
+    }
+  })
+
+  const plan = {
+    action: 'set_clip_mask',
+    clipCount: eligible.length,
+    filter,
+    missingClipIds,
+    skippedNonMaskableClipIds: skipped,
+    changes: {
+      shapeMask: clearShapeMask ? 'remove' : (hasShapeIntent ? 'set' : 'unchanged'),
+      imageMask: clearImageMask ? 'remove' : (maskAsset ? { maskAssetId: maskAsset.id, maskAssetName: maskAsset.name } : 'unchanged'),
+    },
+    clips: perClip.map((entry) => ({
+      ...summarizeClip(entry.clip),
+      currentShapeMask: entry.currentMask,
+      nextShapeMask: entry.nextMask,
+      currentImageMaskEffects: entry.existingMaskEffects.map((effect) => ({
+        id: effect.id,
+        maskAssetId: effect.maskAssetId,
+        enabled: effect.enabled !== false,
+      })),
+    })),
+    ...(maskAsset && perClip.some((entry) => entry.nextMask)
+      ? { note: 'Clips will carry BOTH a shape mask and an image mask. In the Inspector the Mask chips switch between them via the mask bypass; use set_clip_style bypass or clear one of them if that is not intended.' }
+      : {}),
+  }
+
+  if (payload.previewOnly !== false) {
+    return {
+      previewOnly: true,
+      message: 'Clip mask plan only. No timeline change was made.',
+      plan,
+      suggestedApplyPayload: { ...payload, previewOnly: false },
+    }
+  }
+
+  state.saveToHistory?.()
+  const store = useTimelineStore.getState()
+  for (const entry of perClip) {
+    if (entry.shapeMaskChanges) {
+      store.updateClipShapeMask?.(entry.clip.id, entry.nextMask, false)
+    }
+    if (clearImageMask || maskAsset) {
+      for (const effect of entry.existingMaskEffects) {
+        store.removeEffect?.(entry.clip.id, effect.id)
+      }
+    }
+    if (maskAsset) {
+      const created = store.addMaskEffect?.(entry.clip.id, maskAsset.id)
+      if (created && (hasOwn(payload, 'invertImageMask') || hasOwn(payload, 'imageMaskFeather'))) {
+        store.updateEffect?.(entry.clip.id, created.id, {
+          ...(hasOwn(payload, 'invertImageMask') ? { invertMask: Boolean(payload.invertImageMask) } : {}),
+          ...(hasOwn(payload, 'imageMaskFeather') ? { feather: Math.max(0, Number(payload.imageMaskFeather) || 0) } : {}),
+        })
+      }
+    }
+  }
+
+  const updatedIds = new Set(eligible.map((clip) => clip.id))
+  const updatedClips = (useTimelineStore.getState().clips || []).filter((clip) => updatedIds.has(clip.id))
+  return {
+    success: true,
+    action: 'set_clip_mask',
+    clipCount: updatedClips.length,
+    missingClipIds,
+    skippedNonMaskableClipIds: skipped,
+    changes: plan.changes,
+    clips: updatedClips.map((clip) => ({
+      ...summarizeClip(clip),
+      shapeMask: normalizeShapeMask(clip.shapeMask),
+      imageMaskEffects: (clip.effects || []).filter((effect) => effect?.type === 'mask').map((effect) => ({
+        id: effect.id,
+        maskAssetId: effect.maskAssetId,
+        invertMask: Boolean(effect.invertMask),
+        feather: Number(effect.feather) || 0,
+        enabled: effect.enabled !== false,
+      })),
     })),
   }
 }
@@ -7796,6 +8456,8 @@ async function handleMcpAction(request = {}) {
       return handleListRecentProjects(request.payload || {})
     case 'list_glsl_effects':
       return handleListGlslEffects(request.payload || {})
+    case 'set_clip_mask':
+      return handleSetClipMask(request.payload || {})
     case 'set_clip_label_color':
       return handleSetClipLabelColor(request.payload || {})
     case 'set_clips_enabled':
@@ -7804,10 +8466,54 @@ async function handleMcpAction(request = {}) {
       return handlePrepareGenerationFromTimelineContext(request.payload || {})
     case 'queue_prepared_generation':
       return handleQueuePreparedGeneration(request.payload || {})
+    case 'inspect_music_video_keyframe':
+      return handleInspectMusicVideoKeyframe(request.payload || {})
+    case 'regenerate_music_video_keyframe':
+      return handleRegenerateMusicVideoKeyframe(request.payload || {})
+    case 'get_music_video_plan':
+      return handleGetMusicVideoPlan(request.payload || {})
+    case 'inspect_music_video_video':
+      return handleInspectMusicVideoVideo(request.payload || {})
+    case 'regenerate_music_video_video':
+      return handleRegenerateMusicVideoVideo(request.payload || {})
+    case 'get_music_video_session':
+      return handleMusicVideoWorkspaceOperation('get-session', request.payload || {}, 'Music Video session inspection')
+    case 'configure_music_video':
+      return handleMusicVideoWorkspaceOperation('configure', request.payload || {}, 'Music Video configuration')
+    case 'update_music_video_session':
+      return handleMusicVideoWorkspaceOperation('update-session', request.payload || {}, 'Music Video agent session update')
+    case 'manage_music_video_cast':
+      return handleMusicVideoWorkspaceOperation('manage-cast', request.payload || {}, 'Music Video cast update')
+    case 'queue_music_video_character_asset':
+      return handleMusicVideoWorkspaceOperation('queue-character-asset', request.payload || {}, 'Music Video character asset generation')
+    case 'manage_music_video_pass':
+      return handleMusicVideoWorkspaceOperation('manage-pass', request.payload || {}, 'Music Video coverage pass update')
+    case 'set_music_video_director_script':
+      return handleMusicVideoWorkspaceOperation('set-script', request.payload || {}, 'Music Video director script update')
+    case 'update_music_video_shot':
+      return handleMusicVideoWorkspaceOperation('update-shot', request.payload || {}, 'Music Video shot update')
+    case 'queue_music_video_keyframes':
+      return handleMusicVideoWorkspaceOperation('queue-keyframes', request.payload || {}, 'Music Video keyframe batch')
+    case 'queue_music_video_videos':
+      return handleMusicVideoWorkspaceOperation('queue-videos', request.payload || {}, 'Music Video video batch')
+    case 'replace_music_video_keyframe':
+      return handleMusicVideoWorkspaceOperation('replace-keyframe', request.payload || {}, 'Music Video keyframe replacement')
+    case 'replace_music_video_video':
+      return handleMusicVideoWorkspaceOperation('replace-video', request.payload || {}, 'Music Video video replacement')
+    case 'transcribe_music_video_audio':
+      return handleMusicVideoWorkspaceOperation('transcribe-audio', request.payload || {}, 'Music Video audio transcription')
+    case 'assemble_music_video_timeline':
+      return handleMusicVideoWorkspaceOperation('assemble-timeline', request.payload || {}, 'Music Video timeline assembly')
+    case 'replace_music_video_timeline_shot':
+      return handleReplaceMusicVideoTimelineShot(request.payload || {})
+    case 'save_project':
+      return handleSaveProject(request.payload || {})
     case 'queue_timeline_generation_batch':
       return handleQueueTimelineGenerationBatch(request.payload || {})
     case 'queue_timeline_template_generation':
       return handleQueueTimelineTemplateGeneration(request.payload || {})
+    case 'get_generation_queue_status':
+      return handleGetGenerationQueueStatus(request.payload || {})
     case 'import_comfyui_workflow':
       return handleImportComfyUiWorkflow(request.payload || {})
     case 'install_workflow_setup':

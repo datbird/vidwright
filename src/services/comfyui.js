@@ -52,6 +52,47 @@ const VIDWRIGHT_OUTPUT_RESIZE_TITLE = 'Vidwright Output Resize'
 const LEGACY_COMFYSTUDIO_OUTPUT_RESIZE_TITLE = 'Vidwright Output Resize'
 const OUTPUT_RESIZE_TITLES = [VIDWRIGHT_OUTPUT_RESIZE_TITLE, LEGACY_COMFYSTUDIO_OUTPUT_RESIZE_TITLE]
 
+// Users commonly organize ComfyUI model folders into subfolders (e.g.
+// models/diffusion_models/WAN/wan2.2_i2v.safetensors); ComfyUI then lists the
+// file to loader nodes as the relative path "WAN/wan2.2_i2v.safetensors".
+// Vidwright's built-in workflows reference bare filenames, so an unmatched
+// model input is resolved against the node's actual choice list by basename
+// before queueing (see resolveSubfolderModelPaths).
+const MODEL_FILE_INPUT_RE = /\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$/i
+
+function modelPathBasename(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return ''
+  const parts = normalized.split(/[\\/]+/)
+  return parts[parts.length - 1] || ''
+}
+
+function extractComboChoicesFromSpec(inputSpec) {
+  const asList = (values) => Array.isArray(values)
+    ? values.map((entry) => String(entry || '').trim()).filter(Boolean)
+    : []
+  if (!inputSpec) return []
+  if (Array.isArray(inputSpec)) {
+    const [first] = inputSpec
+    if (Array.isArray(first)) return asList(first)
+    if (first && typeof first === 'object') {
+      return asList(first.values || first.choices || first.options || first.enum)
+    }
+  }
+  if (typeof inputSpec === 'object') {
+    return asList(inputSpec.values || inputSpec.choices || inputSpec.options || inputSpec.enum)
+  }
+  return []
+}
+
+function getSchemaInputSpec(nodeSchema, inputKey) {
+  const requiredSpec = nodeSchema?.input?.required?.[inputKey]
+  if (requiredSpec !== undefined) return requiredSpec
+  const optionalSpec = nodeSchema?.input?.optional?.[inputKey]
+  if (optionalSpec !== undefined) return optionalSpec
+  return null
+}
+
 function parseNumericLike(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string') {
@@ -834,14 +875,89 @@ class ComfyUIService {
     return response.json()
   }
 
+  async getObjectInfoCached(maxAgeMs = 60000) {
+    const now = Date.now()
+    if (this._objectInfoCache && (now - this._objectInfoCacheAt) < maxAgeMs) {
+      return this._objectInfoCache
+    }
+    const info = await this.getObjectInfo()
+    this._objectInfoCache = info
+    this._objectInfoCacheAt = now
+    return info
+  }
+
+  /**
+   * Rewrite model-file inputs whose bare filename lives in a subfolder of a
+   * ComfyUI models directory. ComfyUI validates combo inputs against its own
+   * choice list ("WAN/wan2.2.safetensors"), so a bare "wan2.2.safetensors"
+   * from a built-in workflow would be rejected with value_not_in_list even
+   * though the file is installed. Exact matches are left untouched; ambiguous
+   * basenames (same filename in several subfolders) pick the first
+   * alphabetically and say so in the log. Fails open: any error returns the
+   * workflow unchanged and lets ComfyUI's own validation report the problem.
+   */
+  async resolveSubfolderModelPaths(workflow) {
+    try {
+      if (!workflow || typeof workflow !== 'object') return workflow
+
+      const pending = []
+      for (const [nodeId, node] of Object.entries(workflow)) {
+        const inputs = node?.inputs
+        if (!inputs || typeof inputs !== 'object') continue
+        for (const [inputKey, value] of Object.entries(inputs)) {
+          if (typeof value !== 'string') continue
+          const trimmed = value.trim()
+          if (!MODEL_FILE_INPUT_RE.test(trimmed)) continue
+          pending.push({ nodeId, classType: String(node?.class_type || '').trim(), inputKey, value: trimmed })
+        }
+      }
+      if (pending.length === 0) return workflow
+
+      const objectInfo = await this.getObjectInfoCached()
+      if (!objectInfo || typeof objectInfo !== 'object') return workflow
+
+      const substitutions = []
+      for (const entry of pending) {
+        const nodeSchema = objectInfo[entry.classType]
+        if (!nodeSchema) continue
+        const choices = extractComboChoicesFromSpec(getSchemaInputSpec(nodeSchema, entry.inputKey))
+        if (choices.length === 0) continue
+        const lowerValue = entry.value.toLowerCase()
+        if (choices.some((choice) => String(choice).toLowerCase() === lowerValue)) continue
+        const wantedBasename = modelPathBasename(entry.value)
+        if (!wantedBasename) continue
+        const candidates = choices.filter((choice) => modelPathBasename(choice) === wantedBasename)
+        if (candidates.length === 0) continue
+        const resolved = [...candidates].sort()[0]
+        substitutions.push({ ...entry, resolved, ambiguous: candidates.length > 1 })
+      }
+      if (substitutions.length === 0) return workflow
+
+      const resolvedWorkflow = JSON.parse(JSON.stringify(workflow))
+      for (const sub of substitutions) {
+        const target = resolvedWorkflow?.[sub.nodeId]?.inputs
+        if (target) target[sub.inputKey] = sub.resolved
+        console.log(
+          `[ComfyUI] Resolved model input to subfolder path: ${sub.classType}.${sub.inputKey} '${sub.value}' -> '${sub.resolved}'`
+          + (sub.ambiguous ? ' (multiple matches; picked first alphabetically)' : '')
+        )
+      }
+      return resolvedWorkflow
+    } catch (error) {
+      try { console.warn('[ComfyUI] Subfolder model path resolution skipped:', error?.message) } catch (_) { /* ignore */ }
+      return workflow
+    }
+  }
+
   /**
    * Queue a prompt for execution
    */
   async queuePrompt(workflow) {
     try {
+      const resolvedWorkflow = await this.resolveSubfolderModelPaths(workflow)
       const apiKey = await this.getComfyOrgApiKey();
       const payload = {
-        prompt: workflow,
+        prompt: resolvedWorkflow,
         client_id: this.clientId
       };
       if (apiKey) {
@@ -1822,9 +1938,9 @@ export function modifyMultipleAnglesWorkflow(workflow, options = {}) {
  *
  * Contract:
  * - Required node titles:
- *   VIDWRIGHT_INPUT_IMAGE, VIDWRIGHT_PROMPT, VIDWRIGHT_OUTPUT_IMAGE
+ *   VIDWRIGHT_PROMPT, VIDWRIGHT_OUTPUT_IMAGE
  * - Optional node titles:
- *   VIDWRIGHT_SEED, VIDWRIGHT_WIDTH, VIDWRIGHT_HEIGHT,
+ *   VIDWRIGHT_INPUT_IMAGE, VIDWRIGHT_SEED, VIDWRIGHT_WIDTH, VIDWRIGHT_HEIGHT,
  *   VIDWRIGHT_REFERENCE_IMAGE_1, VIDWRIGHT_REFERENCE_IMAGE_2
  */
 export function modifyCustomKeyframeWorkflow(workflow, options = {}) {
@@ -2586,6 +2702,11 @@ export function modifySeedance2Workflow(workflow, options = {}) {
     assetFilenames.referenceAudio3,
     assetFilenames.referenceAudio4,
   ]
+  const referenceVideos = [
+    assetFilenames.referenceVideo1,
+    assetFilenames.referenceVideo2,
+    assetFilenames.referenceVideo3,
+  ]
 
   for (const [nodeId, node] of Object.entries(modified)) {
     if (!node?.inputs) continue
@@ -2629,11 +2750,80 @@ export function modifySeedance2Workflow(workflow, options = {}) {
           const loadNode = modified[String(node.inputs[inputKey][0])]
           if (loadNode?.inputs && 'audio' in loadNode.inputs) loadNode.inputs.audio = filename
         })
+        referenceVideos.forEach((filename, index) => {
+          const inputKey = `model.reference_videos.video_${index + 1}`
+          if (!filename) {
+            if (inputKey in node.inputs) delete node.inputs[inputKey]
+            return
+          }
+          if (!Array.isArray(node.inputs[inputKey])) return
+          const loadNode = modified[String(node.inputs[inputKey][0])]
+          if (loadNode?.class_type === 'LoadVideo' && loadNode.inputs && 'file' in loadNode.inputs) {
+            loadNode.inputs.file = filename
+          }
+        })
       }
     }
 
     if (node.class_type === 'SaveVideo' && 'filename_prefix' in node.inputs) {
       node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'video/seedance2'
+    }
+  }
+
+  return modified
+}
+
+function resolveMinimaxH3Resolution(width, height) {
+  const longestSide = Math.max(Number(width) || 0, Number(height) || 0)
+  if (longestSide >= 2000) return '2K'
+  return '768P'
+}
+
+/**
+ * Configure MiniMax H3 reference-to-video without touching the ComfyUI graph.
+ * H3 receives one exact still and one exact audio segment. The audio is a
+ * reference input, not a request for H3 to compose replacement music.
+ */
+export function modifyMinimaxH3ReferenceWorkflow(workflow, options = {}) {
+  const {
+    prompt = '',
+    width = 2560,
+    height = 1440,
+    duration = 5,
+    seed = Math.floor(Math.random() * 1000000000000),
+    filenamePrefix = 'video/vidwright_minimax_h3',
+    assetFilenames = {},
+  } = options
+
+  const modified = JSON.parse(JSON.stringify(workflow))
+  const referenceImage = String(assetFilenames.referenceImage1 || '').trim()
+  const referenceAudio = String(assetFilenames.referenceAudio1 || '').trim()
+
+  for (const node of Object.values(modified)) {
+    if (!node?.inputs) continue
+
+    if (node.class_type === 'MinimaxHailuo03ReferenceNode') {
+      if ('model.prompt' in node.inputs) node.inputs['model.prompt'] = prompt
+      if ('model.resolution' in node.inputs) node.inputs['model.resolution'] = resolveMinimaxH3Resolution(width, height)
+      if ('model.ratio' in node.inputs) node.inputs['model.ratio'] = resolveClosestAspectRatio(width, height)
+      if ('model.duration' in node.inputs) {
+        node.inputs['model.duration'] = Math.max(5, Math.min(15, Math.round(Number(duration) || 5)))
+      }
+      if ('seed' in node.inputs) node.inputs.seed = seed
+      if ('watermark' in node.inputs) node.inputs.watermark = false
+
+      if (referenceImage && Array.isArray(node.inputs['model.reference_images.image_1'])) {
+        const loadNode = modified[String(node.inputs['model.reference_images.image_1'][0])]
+        if (loadNode?.inputs && 'image' in loadNode.inputs) loadNode.inputs.image = referenceImage
+      }
+      if (referenceAudio && Array.isArray(node.inputs['model.reference_audios.audio_1'])) {
+        const loadNode = modified[String(node.inputs['model.reference_audios.audio_1'][0])]
+        if (loadNode?.inputs && 'audio' in loadNode.inputs) loadNode.inputs.audio = referenceAudio
+      }
+    }
+
+    if (node.class_type === 'SaveVideo' && 'filename_prefix' in node.inputs) {
+      node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'video/vidwright_minimax_h3'
     }
   }
 

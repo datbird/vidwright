@@ -203,6 +203,16 @@ export const KEYFRAMEABLE_PROPERTIES = [
     { id: `${groupKey}.offset`, label: `${groupKey.charAt(0).toUpperCase() + groupKey.slice(1)} Offset`, group: 'adjustments', unit: '' },
     { id: `${groupKey}.hue`, label: `${groupKey.charAt(0).toUpperCase() + groupKey.slice(1)} Hue`, group: 'adjustments', unit: 'deg' },
   ]),
+  // Whole-mask animation: dotted ids so they can't collide with the plain
+  // shape-clip ids ('width'), evaluated by getAnimatedShapeMask — NOT part
+  // of the transform (getAnimatedTransform skips group 'mask').
+  { id: 'shapeMask.centerX', label: 'Mask Center X', group: 'mask', unit: '%' },
+  { id: 'shapeMask.centerY', label: 'Mask Center Y', group: 'mask', unit: '%' },
+  { id: 'shapeMask.width', label: 'Mask Width', group: 'mask', unit: '%' },
+  { id: 'shapeMask.height', label: 'Mask Height', group: 'mask', unit: '%' },
+  { id: 'shapeMask.rotation', label: 'Mask Rotation', group: 'mask', unit: '°' },
+  { id: 'shapeMask.cornerRadius', label: 'Mask Corner Radius', group: 'mask', unit: '%' },
+  { id: 'shapeMask.feather', label: 'Mask Feather', group: 'mask', unit: '%' },
 ]
 
 export const ADJUSTMENT_KEYFRAME_PROPERTIES = [...GLOBAL_ADJUSTMENT_KEYS, ...TONAL_ADJUSTMENT_PROPERTY_IDS]
@@ -398,6 +408,74 @@ export function getAnimatedShapeProperties(clip, clipTime) {
   return normalizeShapeProperties(animatedShapeProperties)
 }
 
+export const SHAPE_MASK_KEYFRAME_KEYS = ['centerX', 'centerY', 'width', 'height', 'rotation', 'cornerRadius', 'feather']
+
+const lerpSplinePoints = (fromPoints, toPoints, t) => fromPoints.map((from, i) => {
+  const to = toPoints[i]
+  return {
+    x: from.x + (to.x - from.x) * t,
+    y: from.y + (to.y - from.y) * t,
+    hIn: { x: from.hIn.x + (to.hIn.x - from.hIn.x) * t, y: from.hIn.y + (to.hIn.y - from.hIn.y) * t },
+    hOut: { x: from.hOut.x + (to.hOut.x - from.hOut.x) * t, y: from.hOut.y + (to.hOut.y - from.hOut.y) * t },
+  }
+})
+
+/**
+ * Shape keyframes for spline masks: each keyframe's value is a WHOLE points
+ * array; interpolation is pairwise per anchor and handle (the Flame/AE
+ * model). Keyframes with mismatched point counts hold the earlier shape
+ * until the next keyframe.
+ */
+export function getSplinePointsAtTime(keyframes, time, defaultPoints) {
+  if (!keyframes || keyframes.length === 0) return defaultPoints
+  const sorted = [...keyframes]
+    .filter((kf) => Number.isFinite(Number(kf?.time)) && Array.isArray(kf?.value) && kf.value.length >= 3)
+    .sort((a, b) => a.time - b.time)
+  if (sorted.length === 0) return defaultPoints
+  if (sorted.length === 1 || time <= sorted[0].time) return sorted[0].value
+  if (time >= sorted[sorted.length - 1].time) return sorted[sorted.length - 1].value
+  let prev = sorted[0]
+  let next = sorted[1]
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (time >= sorted[i].time && time <= sorted[i + 1].time) {
+      prev = sorted[i]
+      next = sorted[i + 1]
+      break
+    }
+  }
+  if (prev.easing === 'hold' || prev.value.length !== next.value.length) return prev.value
+  const duration = next.time - prev.time
+  if (duration === 0) return prev.value
+  const easedT = getEasingFunction(prev.easing)((time - prev.time) / duration)
+  return lerpSplinePoints(prev.value, next.value, easedT)
+}
+
+/**
+ * clip.shapeMask with any keyframed params evaluated at clipTime. Returns the
+ * base mask object itself (same identity) when no mask keyframes exist, so
+ * signature-based raster and render caches stay stable for static masks.
+ */
+export function getAnimatedShapeMask(clip, clipTime) {
+  const baseMask = clip?.shapeMask
+  if (!baseMask || typeof baseMask !== 'object') return baseMask ?? null
+  const keyframes = clip?.keyframes
+  if (!keyframes) return baseMask
+  let animated = null
+  for (const key of SHAPE_MASK_KEYFRAME_KEYS) {
+    const propKeyframes = keyframes[`shapeMask.${key}`]
+    if (propKeyframes && propKeyframes.length > 0) {
+      if (!animated) animated = { ...baseMask }
+      animated[key] = getValueAtTime(propKeyframes, clipTime, Number(baseMask[key]) || 0)
+    }
+  }
+  const pointKeyframes = keyframes['shapeMask.points']
+  if (Array.isArray(baseMask.points) && pointKeyframes && pointKeyframes.length > 0) {
+    if (!animated) animated = { ...baseMask }
+    animated.points = getSplinePointsAtTime(pointKeyframes, clipTime, baseMask.points)
+  }
+  return animated || baseMask
+}
+
 // ==================== MOTION PATHS ====================
 // Spatial position interpolation: when positionX and positionY keyframes
 // share the same times and the clip opts in (transform.motionPathMode =
@@ -510,6 +588,7 @@ export function getAnimatedTransform(clip, clipTime) {
   // Override with keyframed values
   for (const prop of KEYFRAMEABLE_PROPERTIES) {
     if (prop.group === 'time') continue // speed remaps time, not the transform
+    if (prop.group === 'mask') continue // mask props live on clip.shapeMask, not the transform
     const propKeyframes = keyframes[prop.id]
     if (propKeyframes && propKeyframes.length > 0) {
       animatedTransform[prop.id] = getValueAtTime(

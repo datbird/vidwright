@@ -1,4 +1,4 @@
-import { Maximize2, Minimize2, Plus, X, Check, Home, ZoomIn, ZoomOut, Move, Play, Pause, SkipBack, SkipForward, Volume2, Film, Image as ImageIcon, ChevronDown, Grid3X3, Crosshair, Square, Frame, Eye, EyeOff, Layers, Wand2, Camera, Loader2 } from 'lucide-react'
+import { Maximize2, Minimize2, Plus, X, Check, Home, ZoomIn, ZoomOut, Move, Play, Pause, SkipBack, SkipForward, Volume2, Film, Image as ImageIcon, ChevronDown, Grid3X3, Crosshair, Square, Frame, Eye, EyeOff, Layers, Wand2, Camera, Loader2, PictureInPicture2 } from 'lucide-react'
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import useAssetsStore from '../stores/assetsStore'
 import useTimelineStore from '../stores/timelineStore'
@@ -6,12 +6,17 @@ import useProjectStore from '../stores/projectStore'
 import { useFrameForAIStore } from '../stores/frameForAIStore'
 import { useTimelinePlayback } from '../hooks/useTimelinePlayback'
 import useViewportClampedPosition from '../hooks/useViewportClampedPosition'
+import usePreviewPopout from '../hooks/usePreviewPopout'
 import { captureTimelineFrameAt, getTopmostVideoOrImageClipAtTime } from '../utils/captureTimelineFrame'
-import { getAnimatedTransform } from '../utils/keyframes'
+import { getAnimatedTransform, getAnimatedShapeMask } from '../utils/keyframes'
+import { insertSplinePointAfter, removeSplinePointAt } from '../utils/shapeMask'
 import VideoLayerRenderer from './VideoLayerRenderer'
 import CanvasPreviewRenderer from './CanvasPreviewRenderer'
 import AudioLayerRenderer from './AudioLayerRenderer'
 import PreviewTransformGizmo from './PreviewTransformGizmo'
+import MaskShapeGizmo from './MaskShapeGizmo'
+import MaskSplineDrawOverlay from './MaskSplineDrawOverlay'
+import PreviewSourceControls from './PreviewSourceControls'
 import {
   computePreviewSignature,
   renderPreviewChunk,
@@ -376,7 +381,15 @@ function PreviewPanel() {
     inPoint,
     outPoint,
     rangeRenderState,
+    maskEditActive,
+    maskDrawActive,
   } = useTimelineStore()
+
+  // Pen-draw mode ends when the selection changes or the panel unmounts.
+  useEffect(() => {
+    if (!maskDrawActive) return undefined
+    return () => useTimelineStore.getState().setMaskDrawActive(false)
+  }, [maskDrawActive, selectedClipIds])
   
   // Use timeline playback hook
   const {
@@ -1402,9 +1415,124 @@ function PreviewPanel() {
   const currentTime = previewMode === 'timeline' ? playheadPosition : assetCurrentTime
   const duration = previewMode === 'timeline' ? endTime : assetDuration
   const togglePlay = previewMode === 'timeline' ? timelineTogglePlay : assetTogglePlay
-  const seekTo = previewMode === 'timeline' 
+
+  // Asset mode on a video/audio asset gets the source controls (mark In/Out,
+  // insert range — issue #89) under the monitor instead of the plain scrubber.
+  // Same predicate as the asset <video> render/registration branches.
+  const isSourceAssetMode = previewMode === 'asset'
+    && !!currentPreview
+    && currentPreview.type !== 'mask'
+    && currentPreview.type !== 'image'
+  const seekTo = previewMode === 'timeline'
     ? (time) => setPlayheadPosition(Math.max(0, Math.min(endTime, time)), { snap: true })
     : assetSeekTo
+
+  // Detached preview window: mirror whichever tagged element is currently
+  // mounted (compositor canvas, render-chunk video, or asset video).
+  const getPopoutSourceElement = useCallback(() => {
+    const container = containerRef.current
+    if (!container) return null
+    let fallback = null
+    for (const el of container.querySelectorAll('[data-preview-popout-source]')) {
+      if (el.tagName === 'VIDEO') {
+        // Mirror a video only when it is actually presenting (visible in the
+        // layout); a mounted-but-hidden video would freeze the popped-out feed.
+        if (el.videoWidth > 0 && el.offsetParent !== null) return el
+      } else if (!fallback) {
+        fallback = el
+      }
+    }
+    return fallback
+  }, [])
+  const { isPoppedOut: isPreviewPoppedOut, toggle: togglePreviewPopout } = usePreviewPopout({
+    getSourceElement: getPopoutSourceElement,
+    onTogglePlay: togglePlay,
+  })
+
+  // Playback fps meter (Info overlay). The compositor bumps counters in
+  // playbackStatsRef on every committed frame; this side samples them on an
+  // interval and writes straight to the badge DOM node — a React state update
+  // per frame would cost the fps it is trying to measure.
+  const playbackStatsRef = useRef({ commits: 0, presented: 0, drawMs: 0, lastFrameIndex: -1 })
+  const fpsBadgeRef = useRef(null)
+  const fpsSessionRef = useRef({ expected: 0, basePresented: 0, skipped: 0 })
+  useEffect(() => {
+    if (previewMode !== 'timeline' || !showInfoOverlay) return undefined
+    const stats = playbackStatsRef.current
+    const targetFps = timelineSettings?.fps || timelineFps || 30
+    if (isPlaying) {
+      fpsSessionRef.current = { expected: 0, basePresented: stats.presented, skipped: 0 }
+    }
+    let prev = { presented: stats.presented, commits: stats.commits, drawMs: Number(stats.drawMs) || 0, video: null, t: performance.now() }
+    const tick = () => {
+      const el = fpsBadgeRef.current
+      if (!el) return
+      const now = performance.now()
+      const dt = (now - prev.t) / 1000
+      // Never compute over a tiny window (an effect restart's first tick):
+      // a near-zero dt reads as 0 presented frames and paints a false 0.0.
+      if (dt < 0.25) return
+      const session = fpsSessionRef.current
+      let measuredFps = null
+      // Cached-chunk playback bypasses the compositor: measure the <video>
+      // element itself (decoded frame count + decoder-reported drops). Only
+      // trust a video that is visible AND playing — a mounted-but-idle video
+      // (cached chunk standing by) would report 0 new frames forever while
+      // the canvas does the real presenting.
+      const chunkVideo = containerRef.current?.querySelector('video[data-preview-popout-source]')
+      const chunkVideoActive = chunkVideo
+        && chunkVideo.videoWidth > 0
+        && chunkVideo.offsetParent !== null
+        && !chunkVideo.paused
+        && typeof chunkVideo.getVideoPlaybackQuality === 'function'
+      if (chunkVideoActive) {
+        const quality = chunkVideo.getVideoPlaybackQuality()
+        if (prev.video) {
+          measuredFps = Math.max(0, (quality.totalVideoFrames - prev.video.total) / dt)
+          session.skipped += Math.max(0, quality.droppedVideoFrames - prev.video.dropped)
+        }
+        prev.video = { total: quality.totalVideoFrames, dropped: quality.droppedVideoFrames }
+      } else {
+        prev.video = null
+        measuredFps = Math.max(0, (stats.presented - prev.presented) / dt)
+        if (isPlaying) {
+          session.expected += dt * targetFps
+          session.skipped = Math.max(0, Math.round(session.expected - (stats.presented - session.basePresented)))
+        }
+      }
+      // Average compositor cost per committed frame this interval; the gap
+      // between this and the frame interval is time spent outside drawFrame.
+      const commitsDelta = stats.commits - prev.commits
+      const drawDelta = (Number(stats.drawMs) || 0) - (Number(prev.drawMs) || 0)
+      const drawAvgMs = commitsDelta > 0 ? Math.max(0, drawDelta) / commitsDelta : null
+      prev.presented = stats.presented
+      prev.commits = stats.commits
+      prev.drawMs = Number(stats.drawMs) || 0
+      prev.t = now
+      // The badge shows only fps; the skipped count lives here in the
+      // tooltip so diagnosis stays possible without a number on screen
+      // inviting complaints.
+      if (el.parentElement) {
+        el.parentElement.title = `Playback frame rate (target ${targetFps}fps) · ${session.skipped} skipped this play`
+      }
+      if (!isPlaying) {
+        el.textContent = '— fps'
+        el.style.color = 'rgba(255,255,255,0.35)'
+      } else if (measuredFps != null) {
+        el.textContent = drawAvgMs != null
+          ? `${measuredFps.toFixed(1)} fps · ${drawAvgMs.toFixed(0)}ms draw`
+          : `${measuredFps.toFixed(1)} fps`
+        el.style.color = measuredFps >= targetFps * 0.97
+          ? '#4ade80'
+          : (measuredFps >= targetFps * 0.8 ? '#fbbf24' : '#f87171')
+      }
+    }
+    const intervalId = setInterval(tick, 500)
+    return () => clearInterval(intervalId)
+    // timelineSettings is a fresh object every render — depending on it would
+    // restart this effect (and kill the interval) on every playback repaint.
+    // Depend on the fps primitive instead.
+  }, [previewMode, showInfoOverlay, isPlaying, timelineSettings?.fps, timelineFps])
 
   // Check if we have content to show
   const hasContent = previewMode === 'timeline' 
@@ -2319,7 +2447,14 @@ function PreviewPanel() {
               <Crosshair className="w-4 h-4" />
             </button>
           )}
-          <button 
+          <button
+            onClick={togglePreviewPopout}
+            className={`p-1 hover:bg-sf-dark-700 rounded transition-colors ${isPreviewPoppedOut ? 'text-sf-accent' : 'text-sf-text-muted'}`}
+            title={isPreviewPoppedOut ? 'Close detached preview window' : 'Pop out preview to a separate window (drag it to another monitor; double-click it for fullscreen)'}
+          >
+            <PictureInPicture2 className="w-4 h-4" />
+          </button>
+          <button
             onClick={toggleFullscreen}
             className="p-1 hover:bg-sf-dark-700 rounded transition-colors"
             title={isFullscreen ? 'Exit Fullscreen (ESC)' : 'Fullscreen'}
@@ -2369,6 +2504,7 @@ function PreviewPanel() {
                     <video
                       key={activePreviewChunk.path}
                       ref={chunkVideoRef}
+                      data-preview-popout-source="video"
                       src={activePreviewChunk.url}
                       className="absolute inset-0 w-full h-full object-contain bg-black"
                       muted
@@ -2401,6 +2537,7 @@ function PreviewPanel() {
                       timelineFps={timelineSettings?.fps || timelineFps || 30}
                       onClipPointerDown={handlePreviewClipPointerDown}
                       onClipDoubleClick={handlePreviewTextDoubleClick}
+                      playbackStatsRef={playbackStatsRef}
                     />
                   </>
                 )}
@@ -2419,6 +2556,12 @@ function PreviewPanel() {
                           {timelineSettings.width}×{timelineSettings.height} @ {timelineSettings.fps}fps
                         </div>
                       )}
+                      {/* Live playback fps (updated via DOM ref, not state).
+                          pointer-events-auto: the overlay container disables
+                          pointer events, which would make the tooltip unreachable. */}
+                      <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs font-mono tabular-nums pointer-events-auto" title="Playback frame rate vs the timeline target">
+                        <span ref={fpsBadgeRef} style={{ color: 'rgba(255,255,255,0.35)' }}>— fps</span>
+                      </div>
                       {activeLayerClips.length > 1 ? (
                         // Show layer count in multi-layer mode
                         <div className="px-2 py-1 bg-green-600/80 rounded text-xs text-white">
@@ -2645,6 +2788,7 @@ function PreviewPanel() {
                     )}
                     <video
                       ref={videoRefA}
+                      data-preview-popout-source="video"
                       src={currentPreview.url}
                       className="w-full h-full"
                       style={{
@@ -2811,7 +2955,78 @@ function PreviewPanel() {
             )}
           </div>
 
-          {showPreviewTransformControls && selectedPreviewClip && selectedPreviewTransform && (
+          {/* Mask gizmo takes over while the Inspector's Mask section is
+              open on a masked clip — two gizmos at once is handle soup. */}
+          {maskDrawActive && selectedPreviewClip && selectedPreviewTransform && (
+            <div
+              className="absolute inset-0 overflow-visible pointer-events-none"
+              style={previewStageStyle}
+            >
+              <MaskSplineDrawOverlay
+                transform={selectedPreviewTransform}
+                buildVideoTransform={buildVideoTransform}
+                frameRect={selectedPreviewFrameRect}
+                onCancel={() => useTimelineStore.getState().setMaskDrawActive(false)}
+                onCommit={(maskUpdates) => {
+                  const store = useTimelineStore.getState()
+                  store.saveToHistory()
+                  store.updateClipShapeMask(selectedPreviewClip.id, maskUpdates, false)
+                  store.setMaskDrawActive(false)
+                }}
+              />
+            </div>
+          )}
+
+          {!maskDrawActive && maskEditActive && selectedPreviewClip?.shapeMask && selectedPreviewTransform && (
+            <div
+              className="absolute inset-0 overflow-visible pointer-events-none"
+              style={previewStageStyle}
+            >
+              <MaskShapeGizmo
+                clip={selectedPreviewClip}
+                mask={getAnimatedShapeMask(selectedPreviewClip, playheadPosition - (selectedPreviewClip.startTime || 0)) || selectedPreviewClip.shapeMask}
+                transform={selectedPreviewTransform}
+                buildVideoTransform={buildVideoTransform}
+                frameRect={selectedPreviewFrameRect}
+                disabled={isSpaceHeld || isPanning || isZooming}
+                onInteractionStart={() => useTimelineStore.getState().saveToHistory()}
+                onMaskChange={(updates, meta) => {
+                  const store = useTimelineStore.getState()
+                  store.updateClipShapeMask(selectedPreviewClip.id, updates, false)
+                  const maskClipTime = playheadPosition - (selectedPreviewClip.startTime || 0)
+                  for (const [key, value] of Object.entries(updates || {})) {
+                    const propertyId = `shapeMask.${key}`
+                    if (key === 'points') {
+                      if (!hasKeyframes(selectedPreviewClip.id, propertyId)) continue
+                      if (meta?.structural) {
+                        // Topology edits replay onto EVERY shape keyframe so
+                        // point counts stay matched and interpolation keeps
+                        // working — the same split/remove runs per keyframe's
+                        // own geometry.
+                        const existing = selectedPreviewClip.keyframes?.[propertyId] || []
+                        for (const keyframe of existing) {
+                          if (!Array.isArray(keyframe.value)) continue
+                          const nextValue = meta.structural === 'insert'
+                            ? insertSplinePointAfter(keyframe.value, meta.index)
+                            : removeSplinePointAt(keyframe.value, meta.index)
+                          store.setKeyframe(selectedPreviewClip.id, propertyId, keyframe.time, nextValue, keyframe.easing || 'easeInOut', { saveHistory: false })
+                        }
+                      } else if (Array.isArray(value)) {
+                        store.setKeyframe(selectedPreviewClip.id, propertyId, maskClipTime, value, 'easeInOut', { saveHistory: false })
+                      }
+                      continue
+                    }
+                    if (typeof value !== 'number') continue
+                    if (hasKeyframes(selectedPreviewClip.id, propertyId)) {
+                      store.setKeyframe(selectedPreviewClip.id, propertyId, maskClipTime, value, 'easeInOut', { saveHistory: false })
+                    }
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          {showPreviewTransformControls && !maskDrawActive && !(maskEditActive && selectedPreviewClip?.shapeMask) && selectedPreviewClip && selectedPreviewTransform && (
             <div
               className="absolute inset-0 overflow-visible pointer-events-none"
               style={previewStageStyle}
@@ -2845,8 +3060,15 @@ function PreviewPanel() {
         </div>
       </div>
       
+      {/* Source controls (asset mode, video/audio): range scrubber + In/Out
+          marks + insert buttons. Replaces the plain scrubber so there is one
+          bar; the timeline below stays visible while inserting. */}
+      {isSourceAssetMode && !isFullscreen && (
+        <PreviewSourceControls asset={currentPreview} />
+      )}
+
       {/* Preview Scrubber Bar - Like DaVinci Resolve's viewer scrubber */}
-      {hasContent && !isFullscreen && (
+      {hasContent && !isFullscreen && !isSourceAssetMode && (
         <div className="h-7 bg-sf-dark-900 border-t border-sf-dark-700 flex items-center px-3 gap-2 flex-shrink-0">
           {/* Timecode - Current */}
           <span className="text-[10px] text-sf-text-secondary font-mono w-12 text-right">

@@ -247,11 +247,11 @@ Use this when delivery matters:
 
 For social variants, preview `export_delivery_batch` before running it.
 
-For interchange, preview `export_fcpxml` before writing a file.
+For interchange, preview `export_fcpxml` before writing a file. Use `format: "fcpxml"` for Resolve/Final Cut or `format: "premiere"` for Adobe Premiere Pro.
 
 ## Tool Catalog
 
-Vidwright currently exposes 103 MCP tools.
+Vidwright currently exposes 125 MCP tools.
 
 ### Project, Recipes, And Discovery
 
@@ -267,6 +267,7 @@ Vidwright currently exposes 103 MCP tools.
 | `open_project` | Preview or open a project by path or recent project name. |
 | `create_project` | Preview or create a new project in the configured Projects folder. |
 | `duplicate_project` | Preview or duplicate a project folder and open it on apply. |
+| `save_project` | Preview or explicitly save the current project, including Director state and the active timeline. |
 
 ### Health, Inspection, And Review
 
@@ -281,8 +282,35 @@ Vidwright currently exposes 103 MCP tools.
 | `inspect_visible_shots` | Find top-visible shot changes and sample each visible shot. |
 | `get_generation_status` | Summarize active, failed, and recent generated asset status. |
 | `get_music_video_status` | Summarize music-video workflow assets, assembled clips, and sync locks. |
+| `get_music_video_plan` | Return every parsed Music Video scene and shot, including IDs, prompts, timing, workflows, active jobs, and Step 4/5 completion state. |
+| `inspect_music_video_keyframe` | Inspect one Music Video Step 4 shot, including its prompt, workflow routing, active job, latest image, and generation history. |
+| `regenerate_music_video_keyframe` | Preview or queue one Step 4 shot through the active Music Video keyframe settings and native routing. |
+| `inspect_music_video_video` | Inspect one Music Video Step 5 shot, including its input keyframe, motion prompt, timing, active job, latest video, history, and poster. |
+| `regenerate_music_video_video` | Preview or queue one Step 5 shot through the active Music Video video settings and native routing. |
 | `analyze_timeline` | Produce an AI-friendly timeline health report. |
 | `analyze_music_video_workflow` | Produce an AI-friendly music-video workflow health report. |
+
+### Agent-Guided Music Video Creation
+
+These tools use the same persistent Director state as the visible Music Video UI. An agent-created project can therefore be opened, revised, regenerated, assembled, and saved through either MCP or the normal interface.
+
+| Tool | Purpose |
+| --- | --- |
+| `get_music_video_session` | Read song, lyrics, creative direction, cast, workflows, output, passes, plan state, queue, and the resumable conversation checkpoint. |
+| `configure_music_video` | Preview or set the song, lyrics, concept, style, workflows, output resolution, and FPS. |
+| `update_music_video_session` | Preview or persist the current conversational phase, next question, decisions, approvals, and notes. |
+| `manage_music_video_cast` | Preview or add, update, remove, replace, or clear named performers and their image references. |
+| `queue_music_video_character_asset` | Preview or queue a Z-Image Turbo portrait or Multiple Angles character sheet. |
+| `manage_music_video_pass` | Preview or manage alternate performance, environmental b-roll, and detail b-roll passes. |
+| `set_music_video_director_script` | Validate, save, and optionally parse a master or coverage-pass director script. |
+| `update_music_video_shot` | Preview or revise one parsed shot's prompts, timing, camera, type, artist, or reference overrides. |
+| `queue_music_video_keyframes` | Preview or queue missing, all, or selected keyframes through native Director routing. |
+| `queue_music_video_videos` | Preview or queue missing, all, or selected videos from their generated keyframes. |
+| `replace_music_video_keyframe` | Preview or replace a Step 4 result with an existing project image. |
+| `replace_music_video_video` | Preview or replace a Step 5 result with an existing project video. |
+| `transcribe_music_video_audio` | Preview or run Qwen ASR transcription or provided-lyrics alignment. |
+| `assemble_music_video_timeline` | Preview or assemble ready videos and song audio into editable coverage tracks with sync locks. |
+| `replace_music_video_timeline_shot` | Preview or replace an assembled shot while preserving its edit timing, effects, transforms, and sync lock. |
 
 ### ComfyUI Setup And Workflow Support
 
@@ -371,6 +399,8 @@ Vidwright currently exposes 103 MCP tools.
 | `prepare_generation_from_timeline_context` | Preview/apply staging Generate from a selected clip or playhead frame. |
 | `queue_prepared_generation` | Preview/queue the currently staged Generate request. |
 | `queue_timeline_generation_batch` | Preview/queue multiple image-to-video generations from timeline context. |
+| `queue_h3_reference_video` | Preview/queue one MiniMax H3 image+audio reference performance shot without opening the ComfyUI canvas. |
+| `get_generation_queue_status` | Poll live Generate jobs, prompt IDs, progress, failures, and imported result asset IDs. |
 | `queue_prompt_generation_batch` | Preview/queue text-to-image or text-to-video generations from prompts. |
 
 ### Captions
@@ -406,7 +436,7 @@ Vidwright currently exposes 103 MCP tools.
 | --- | --- |
 | `export_timeline` | Preview/start a timeline export through Vidwright's export worker. |
 | `export_delivery_batch` | Preview/run several delivery exports such as 16:9, 1:1, and 9:16. |
-| `export_fcpxml` | Preview/export the active timeline as FCPXML for Resolve, Final Cut, or Premiere. |
+| `export_fcpxml` | Preview/export modern FCPXML for Resolve/Final Cut or XMEML v5 for Adobe Premiere Pro. |
 
 ## Preview/Apply Examples
 
@@ -463,6 +493,36 @@ Preview a small generation batch:
       }
     ],
     "previewOnly": true
+  }
+}
+```
+
+Preview a MiniMax H3 lip-sync shot before spending credits:
+
+```json
+{
+  "tool": "queue_h3_reference_video",
+  "arguments": {
+    "imageAssetId": "asset-reference-frame",
+    "audioAssetId": "asset-exact-audio-segment",
+    "shotId": "S01",
+    "prompt": "Use Image 1 as the exact identity and composition reference. Use Audio 1 as the exact and sole performance-timing reference. Synchronize every visible mouth movement precisely to the supplied audio.",
+    "durationSeconds": 9,
+    "resolutionTier": "2K",
+    "aspectRatio": "16:9",
+    "previewOnly": true
+  }
+}
+```
+
+After explicit approval, repeat with `previewOnly: false`, then poll:
+
+```json
+{
+  "tool": "get_generation_queue_status",
+  "arguments": {
+    "workflowId": "minimax-h3-r2v",
+    "includeDone": true
   }
 }
 ```
@@ -534,4 +594,3 @@ For square or vertical exports, make sure the agent previews `deliveryFraming` s
 - Do not assume a write tool changed the project unless the returned result says it applied successfully.
 - Favor explicit IDs from read tools over natural-language targeting for write tools.
 - Queueing generation and running exports can take time. Poll status tools such as `get_generation_status`, `get_caption_status`, or inspect output files after completion.
-
